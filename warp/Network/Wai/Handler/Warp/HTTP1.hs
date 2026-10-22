@@ -1,5 +1,4 @@
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PackageImports #-}
@@ -23,12 +22,16 @@ import qualified Data.ByteString as BS
 import Data.Char (chr)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Word8 (_cr, _space)
+import Foreign.Marshal.Alloc (allocaBytes)
+import Foreign.Marshal.Utils (fillBytes)
 import Network.Socket (SockAddr (SockAddrInet, SockAddrInet6))
 import Network.Wai
 import Network.Wai.Internal (ResponseReceived (ResponseReceived))
 import qualified System.TimeManager as T
+import System.Timeout (timeout)
 import "iproute" Data.IP (toHostAddress, toHostAddress6)
 
+import Network.Wai.Handler.Warp.Buffer (releaseWriteBuffer)
 import Network.Wai.Handler.Warp.Header
 import Network.Wai.Handler.Warp.Imports hiding (readInt)
 import Network.Wai.Handler.Warp.ReadInt
@@ -91,15 +94,29 @@ http1With streaming settings ii conn transport app origAddr th bs0 = do
             ProxyProtocolNone ->
                 return origAddr
             ProxyProtocolRequired -> do
-                seg <- readSource src
+                seg <- proxySegment True src
                 parseProxyProtocolHeader src seg
             ProxyProtocolOptional -> do
-                seg <- readSource src
+                seg <- proxySegment False src
                 if BS.isPrefixOf "PROXY " seg
                     then parseProxyProtocolHeader src seg
                     else do
                         leftoverSource src seg
                         return origAddr
+
+    -- Streaming readiness reads one byte without a body grant. PROXY is
+    -- bounded control metadata and must be assembled before HTTP admission.
+    proxySegment required src = case streaming of
+        Nothing -> readSource src
+        Just _ -> gather BS.empty
+      where
+        gather bytes
+            | BS.elem 10 bytes = pure bytes
+            | not required && BS.length bytes >= 6 && not (BS.isPrefixOf "PROXY " bytes) = pure bytes
+            | BS.length bytes >= 108 = throwIO (BadProxyHeader (decodeAscii bytes))
+            | otherwise = do
+                next <- readSource src
+                if BS.null next then pure bytes else gather (bytes <> next)
 
     parseProxyProtocolHeader src seg = do
         let (header, seg') = BS.break (== _cr) seg
@@ -172,17 +189,38 @@ http1server streaming settings ii conn transport app addr th istatus initialSour
                     FirstRequest -> throwIO ConnectionClosedByPeer
                     SubsequentRequest -> throwIO NoKeepAliveRequest
                 writeIORef istatus True
-                T.pause th
-                withRequestBuffers resources $ \access -> do
+                E.mask $ \restore -> do
+                    waiting <- newIORef True
+                    -- Primary admission uses the connection's request timeout.
+                    T.pause th
                     T.resume th
-                    input <- newInputContext access receive prefix
-                    let src = contextSource input
-                    flip E.finally (closeInputContext input) $ do
-                        decision <- serve firstRequest src (Just (access, appHandler, input))
-                        prefix' <- inputLeftover input
-                        next <- mkSource metadata
-                        leftoverSource next prefix'
-                        pure (decision, next)
+                    restore (withRequestBuffers resources $ \access -> do
+                        writeIORef waiting False
+                        T.resume th
+                        input <- newInputContext access receive prefix
+                        let src = contextSource input
+                        flip E.finally (closeInputContext input) $ do
+                            decision <- serve firstRequest src (Just (access, appHandler, input))
+                            prefix' <- inputLeftover input
+                            next <- mkSource metadata
+                            leftoverSource next prefix'
+                            pure (decision, next)) `E.catch` \T.TimeoutThread -> do
+                        stillWaiting <- readIORef waiting
+                        if stillWaiting
+                            then do
+                                -- The acquisition scope has released any late grant.
+                                -- Give this direct write its own timeout.
+                                writeIORef istatus False
+                                T.pause th
+                                T.resume th
+                                sent <- E.try (restore (connSendAll conn admissionUnavailable))
+                                case sent of
+                                    Left (_ :: E.IOException) -> pure ()
+                                    Right () -> do
+                                        T.pause th
+                                        void $ restore $ timeout 250000 (drainRejectedRequest receive)
+                                pure (CloseConnection, previous)
+                            else throwIO T.TimeoutThread
         case keepAlive of
             ReuseConnection -> loop SubsequentRequest next
             CloseConnection -> return ()
@@ -212,6 +250,24 @@ http1server streaming settings ii conn transport app addr th istatus initialSour
 
 data ReuseConnection = ReuseConnection | CloseConnection
 
+admissionUnavailable :: ByteString
+admissionUnavailable =
+    "HTTP/1.1 503 Service Unavailable\r\nWarp-Error: request-buffer-timeout\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+
+-- An unread upload can turn an immediate TCP close into a reset that hides
+-- the 503. Consume a small amount of already arriving data before closing.
+-- The caller also bounds this entire drain by wall-clock time.
+drainRejectedRequest :: Receive -> IO ()
+drainRejectedRequest receive = allocaBytes 1024 $ \scratch -> do
+    fillBytes scratch 0 1024
+    loop 16384 scratch
+  where
+    loop remaining scratch
+        | remaining <= 0 = pure ()
+        | otherwise = do
+            count <- receive scratch (min 1024 remaining) `E.catch` \(_ :: E.IOException) -> pure 0
+            when (count > 0 && count <= min 1024 remaining) $ loop (remaining - count) scratch
+
 processRequest :: Maybe (BufferAccess, Streaming.Application, InputContext)
     -> Settings -> InternalInfo -> Connection -> Application -> T.Handle -> IORef Bool
     -> Source -> Request -> Maybe (IORef Int) -> IndexedRequestHeader -> IO ByteString
@@ -225,14 +281,23 @@ processRequest operation settings ii conn app th istatus src req mremainingRef i
     -- an async exception before calling the ResponseSource.
     keepAliveRef <- newIORef False
     finishedRef <- newIORef Nothing
-    let finish = finishRequestBody settings th mremainingRef nextBodyFlush
+    let releaseOutput = case operation of
+            Nothing -> pure ()
+            Just _ -> releaseWriteBuffer (connWriteBuffer conn)
+        finish = finishRequestBody settings th mremainingRef nextBodyFlush
         attach input buffer use = withInputBuffer input buffer $ do
             result <- use (Stream.Source $ \consume -> E.mask $ \restore -> do
                 chunk <- restore (getRequestBodyChunk req)
-                restore (consume chunk))
+                restore (consume chunk) `E.finally` releaseConsumedInput input)
             startedResponse <- not <$> readIORef istatus
             persistent <- readIORef keepAliveRef
-            decision <- finish (not startedResponse || persistent)
+            remaining <- traverse readIORef mremainingRef
+            -- Before a final response, an unpulled expected upload needs its
+            -- 100 Continue before this scope can drain and return the buffer.
+            let drain = if startedResponse || remaining == Just 0
+                    then nextBodyFlush else getRequestBodyChunk req
+            decision <- finishRequestBody settings th mremainingRef drain
+                (not startedResponse || persistent)
             writeIORef finishedRef (Just decision)
             T.pause th
             pure result
@@ -251,6 +316,7 @@ processRequest operation settings ii conn app th istatus src req mremainingRef i
         -- However, it may affect performance.
         writeIORef istatus False
         keepAlive <- sendResponse settings conn ii th req idxhdr (readSource src) res
+            `E.finally` releaseOutput
         writeIORef keepAliveRef keepAlive
         return ResponseReceived
     case r of
@@ -260,6 +326,7 @@ processRequest operation settings ii conn app th istatus src req mremainingRef i
             | isAsyncException e -> throwIO e
             | otherwise -> do
                 keepAlive <- sendErrorResponse settings ii conn th istatus req e
+                    `E.finally` releaseOutput
                 settingsOnException settings (Just req) e
                 writeIORef keepAliveRef (case operation of Nothing -> keepAlive; Just _ -> False)
 
