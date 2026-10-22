@@ -67,14 +67,14 @@ spec = describe "HTTP/1 operation-stream runner" $ do
                 B.isSuffixOf "two" response `shouldSatisfy` P.eq True
             readIORef count `shouldSatisfy` P.returns (P.eq 2)
 
-    xfail "implementation follows in the paired change" $ it "keeps idle streaming connections free of HTTP output payload storage" $
+    it "keeps idle streaming connections free of HTTP output payload storage" $
         bracket (socket AF_INET Stream defaultProtocol) close $ \sock ->
             bracket (socketConnectionHTTP1 defaultSettings sock)
                 (\conn -> readIORef (connWriteBuffer conn) >>= bufFree) $ \conn -> do
                     scratch <- readIORef (connWriteBuffer conn)
                     bufSize scratch `shouldSatisfy` P.eq 0
 
-    xfail "implementation follows in the paired change" $ it "lazily supports materialized compatibility responses" $ do
+    it "lazily supports materialized compatibility responses" $ do
         getAcquisition >>= \acquisition -> newBufferPool acquisition (PoolSettings { bufferSize = positiveInt @8, ordinaryBufferCount = positiveInt @1, reserveBufferCount = positiveInt @1, setupBufferCount = positiveInt @1 }) >>= \resources ->
             withServer resources (\_ exchange -> respondResponse exchange (responseLBS status200 [] "owned")) $ \client -> do
                 NS.sendAll client "GET / HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n"

@@ -4,7 +4,7 @@ import Control.Exception (mask_)
 import qualified Data.ByteString as B (length)
 import Data.ByteString.Builder (Builder)
 import Data.ByteString.Builder.Extra (Next (Chunk, Done, More), runBuilder)
-import Data.IORef (IORef, readIORef, writeIORef)
+import Data.IORef (IORef, writeIORef)
 import Foreign.Ptr (plusPtr)
 import Network.Wai.Handler.Warp.Buffer
 import Network.Wai.Handler.Warp.Imports
@@ -36,7 +36,7 @@ unsafeToBufIOWithOffset
     -> Builder
     -> IO Integer
 unsafeToBufIOWithOffset offset0 maxRspBufSize writeBufferRef io builder = do
-    writeBuffer <- readIORef writeBufferRef
+    writeBuffer <- ensureWriteBuffer (min 16384 maxRspBufSize) writeBufferRef
     loop writeBuffer offset0 firstWriter 0
   where
     firstWriter = runBuilder builder

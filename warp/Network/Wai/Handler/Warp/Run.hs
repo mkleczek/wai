@@ -23,6 +23,7 @@ import qualified Data.ByteString as S
 import Data.Functor (($>))
 import Data.IORef (newIORef, readIORef, IORef, writeIORef)
 import Data.Streaming.Network (bindPortTCP)
+import Foreign.Ptr (nullPtr)
 import Foreign.C.Error (Errno (..), eCONNABORTED, eMFILE)
 import GHC.Conc.Sync (labelThread, myThreadId)
 import GHC.IO.Exception (IOErrorType (..), IOException (..))
@@ -55,7 +56,7 @@ import System.IO.Error (ioeGetErrorType)
 import qualified System.TimeManager as T
 import System.Timeout (timeout)
 
-import Network.Wai.Handler.Warp.Buffer (createWriteBuffer)
+import Network.Wai.Handler.Warp.Buffer (createWriteBuffer, ensureWriteBuffer)
 import Network.Wai.Handler.Warp.Counter
 import qualified Network.Wai.Handler.Warp.Date as D
 import qualified Network.Wai.Handler.Warp.FdCache as F
@@ -74,10 +75,17 @@ import Network.Wai.Handler.Warp.Types
 -- (N.B. make sure the 'Settings' have an initialized 'ServerState' to guarantee
 -- a graceful shutdown)
 socketConnection :: Settings -> Socket -> IO Connection
-socketConnection set s = do
+socketConnection = socketConnectionWith True
+
+socketConnectionWith :: Bool -> Settings -> Socket -> IO Connection
+socketConnectionWith legacyBuffers set s = do
     (ss, _) <- makeServerState set
-    bufferPool <- newBufferPool 2048 16384
-    writeBuffer <- createWriteBuffer 16384
+    recvAction <- if legacyBuffers then do
+        bufferPool <- newBufferPool 2048 16384
+        pure (receive' bufferPool ss)
+      else pure (\_ -> ioError (userError "legacy receive is unavailable in the HTTP/1 operation runner"))
+    writeBuffer <- if legacyBuffers then createWriteBuffer 16384
+        else pure (WriteBuffer nullPtr 0 (pure ()))
     writeBufferRef <- newIORef writeBuffer
     isH2 <- newIORef False -- HTTP/1.x
     mysa <- getSocketName s
@@ -100,7 +108,7 @@ socketConnection set s = do
 #else
             , connClose = close s
 #endif
-            , connRecv = receive' bufferPool ss appsInProgress
+            , connRecv = recvAction appsInProgress
             , connRecvInto = Just (recvBuf s)
             , connRecvBuf = \_ _ -> return True -- obsoleted
             , connWriteBuffer = writeBufferRef
@@ -118,7 +126,7 @@ socketConnection set s = do
             | otherwise = E.throwIO e
 
     sendfile writeBufferRef fid offset len hook headers = do
-        writeBuffer <- readIORef writeBufferRef
+        writeBuffer <- ensureWriteBuffer 16384 writeBufferRef
         sendFile
             s
             (bufBuffer writeBuffer)
@@ -213,11 +221,10 @@ runSettings set app =
                 runSettingsSocket set socket app
             )
 
--- | HTTP/1 operation transport construction. Compatibility scratch becomes
--- lazy in the following storage change; the protocol route already bypasses
--- legacy receive and protocol sniffing.
+-- | Operation connections need no persistent receive pool or output payload
+-- storage. Their fixed metadata scratch belongs to the HTTP/1 protocol loop.
 socketConnectionHTTP1 :: Settings -> Socket -> IO Connection
-socketConnectionHTTP1 = socketConnection
+socketConnectionHTTP1 = socketConnectionWith False
 
 -- | This installs a shutdown handler for the given socket and
 -- calls 'runSettingsConnection' with the default connection setup action
