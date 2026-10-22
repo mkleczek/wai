@@ -7,8 +7,8 @@ module ExchangeSpec (spec) where
 
 import Control.Concurrent.Resource.Acquisition (Context, newContext)
 import GHC.Event (getSystemTimerManager)
-import Control.Monad (void)
-import Control.Exception (SomeException, try, finally, evaluate)
+import Control.Monad (void, forM_)
+import Control.Exception (SomeException, bracket, try, finally, evaluate)
 import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, tryPutMVar, threadDelay)
 import Control.Concurrent.Async (async, waitCatch, cancel)
 import System.Timeout (timeout)
@@ -46,7 +46,7 @@ withHTTP1Exchange resources request attach send app =
         Internal.withHTTP1Exchange access request
             (\supplied use -> case supplied of
                 Just buffer -> attach buffer use
-                Nothing -> withBuffer access (`attach` use)) send app
+                Nothing -> bracket (borrowBuffer access) releaseBuffer (\loan -> attach (loanBuffer loan) use)) send app
 
 rejects :: IO a -> IO ()
 rejects action = do
@@ -90,15 +90,18 @@ spec = describe "HTTP/1 operation exchange" $ do
             Just exchange <- readIORef exchangeRef
             rejects (S.respond exchange status200 [] (\_ -> pure ()))
             rejects (withBodyBuffer exchange (Buffer fp 8) (\_ -> pure ()))
-    it "rejects HTTP/2 before using backend capabilities" $ do
+    it "rejects HTTP/2 and upgrade requests before using backend capabilities" $ do
         called <- newIORef False
         getAcquisition >>= \acquisition -> newBufferPool acquisition (PoolSettings { bufferSize = positiveInt @8, ordinaryBufferCount = positiveInt @1, reserveBufferCount = positiveInt @1, setupBufferCount = positiveInt @1 }) >>= \resources -> do
             withHTTP1Exchange resources (defaultRequest { httpVersion = http11 })
                 (\_ use -> use (owned $ pure "")) (\_ -> pure ())
                 (\_ exchange -> S.respond exchange status200 [] (\_ -> pure ()))
-            rejects $ withHTTP1Exchange resources (defaultRequest { httpVersion = http20 })
-                (\_ use -> writeIORef called True >> use (owned $ pure ""))
-                (\_ -> writeIORef called True) (\_ _ -> writeIORef called True)
+            forM_ [defaultRequest { httpVersion = http20 },
+                   defaultRequest { httpVersion = http11, Network.Wai.requestHeaders = [("Upgrade", "websocket")] },
+                   defaultRequest { httpVersion = http11, Network.Wai.requestHeaders = [("uPgRaDe", "websocket")] }] $ \request ->
+                rejects $ withHTTP1Exchange resources request
+                    (\_ use -> writeIORef called True >> use (owned $ pure ""))
+                    (\_ -> writeIORef called True) (\_ _ -> writeIORef called True)
             readIORef called `shouldSatisfy` P.returns (P.eq False)
 
     it "public withBody uses one pooled input region and returns it at scope exit" $ do
@@ -108,7 +111,8 @@ spec = describe "HTTP/1 operation exchange" $ do
                     bufferCapacity buffer `shouldSatisfy` P.eq 8
                     use (owned $ pure "pooled")) (\_ -> pure ()) $ \request exchange -> do
                     S.withBody exchange $ \source -> pull source `shouldSatisfy` P.returns (P.eq "pooled")
-                    withBuffer (S.requestBuffers request) $ \buffer -> bufferCapacity buffer `shouldSatisfy` P.eq 8
+                    bracket (borrowBuffer (S.requestBuffers request)) releaseBuffer $ \loan ->
+                        bufferCapacity (loanBuffer loan) `shouldSatisfy` P.eq 8
                     S.respond exchange status200 [] (\_ -> pure ())
     it "rejects concurrent pulls and joins a blocked reader before input detach" $ do
         fp <- mallocForeignPtrBytes 8
