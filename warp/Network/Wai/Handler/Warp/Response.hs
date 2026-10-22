@@ -191,6 +191,7 @@ sendResponse settings conn ii th req reqidxhdr src response = do
         ResponseStream _ _ fb
             | isHead -> RspNoBody
             | otherwise -> RspStream fb needsChunked
+        ResponseBytes _ _ _ -> error "byte response not implemented"
         ResponseRaw raw _ -> RspRaw raw src
     -- Should be False if (http10 && not hasLength), regardless of what
     -- the 'Connection' header says. (as long as the response should have a body)
@@ -206,6 +207,7 @@ sendResponse settings conn ii th req reqidxhdr src response = do
         ResponseStream{} -> isKeepAlive
         -- Is already an ongoing open connection, so if it is done,
         -- the connection should be closed.
+        ResponseBytes{} -> isKeepAlive
         ResponseRaw{} -> False
 
 ----------------------------------------------------------------

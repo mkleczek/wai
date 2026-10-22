@@ -1,0 +1,106 @@
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE OverloadedStrings #-}
+module ExchangeSpec (spec) where
+
+import Control.Concurrent.Resource.Acquisition (Context, newContext)
+import GHC.Event (getSystemTimerManager)
+import Control.Monad (void)
+import Control.Exception (SomeException, try, finally, evaluate)
+import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, tryPutMVar, threadDelay)
+import Control.Concurrent.Async (async, waitCatch, cancel)
+import System.Timeout (timeout)
+import Data.Maybe (isJust)
+import Data.Either (isLeft)
+import Data.IORef
+import Foreign.ForeignPtr (mallocForeignPtrBytes)
+import Network.HTTP.Types (http11, http20, status200)
+import Network.Streaming.PositiveInt (positiveInt)
+import Network.Streaming.BufferPool
+import Network.Streaming.Buffer (Buffer (..))
+import qualified Network.Wai
+import Network.Wai (defaultRequest, httpVersion, getRequestBodyChunk, responseLBS, responseRaw)
+import Network.Wai.Internal (Response (..))
+import qualified Network.Wai.Streaming as S
+import Network.Wai.Handler.Warp.Streaming.Internal hiding (withHTTP1Exchange)
+import qualified Network.Wai.Handler.Warp.Streaming.Internal as Internal
+import Network.Streaming (Source (..))
+import qualified Data.ByteString as B
+import qualified Skeletest.Predicate as P
+import Skeletest
+
+owned :: IO B.ByteString -> Source
+owned action = Source $ \consume -> action >>= consume
+
+pull :: Source -> IO B.ByteString
+pull source = withChunk source (evaluate . B.copy)
+
+withHTTP1Exchange :: BufferPool -> Network.Wai.Request
+    -> (forall b. Buffer -> (Source -> IO b) -> IO b)
+    -> (Network.Wai.Response -> IO ())
+    -> (S.Request -> S.Exchange -> IO a) -> IO a
+withHTTP1Exchange resources request attach send app =
+    withRequestBuffers resources $ \access ->
+        Internal.withHTTP1Exchange access request
+            (\supplied use -> case supplied of
+                Just buffer -> attach buffer use
+                Nothing -> withBuffer access (`attach` use)) send app
+
+rejects :: IO a -> IO ()
+rejects action = do
+    outcome <- try (void action) :: IO (Either SomeException ())
+    isLeft outcome `shouldSatisfy` P.eq True
+
+spec :: Spec
+spec = describe "HTTP/1 operation exchange" $ do
+    xfail "implementation follows in the paired change" $ it "uses explicitly supplied storage in the low-level input hook" $ do
+        fp <- mallocForeignPtrBytes 8
+        getAcquisition >>= \acquisition -> newBufferPool acquisition (PoolSettings { bufferSize = positiveInt @8, ordinaryBufferCount = positiveInt @1, reserveBufferCount = positiveInt @1, setupBufferCount = positiveInt @1 }) >>= \resources ->
+            withHTTP1Exchange resources (defaultRequest { httpVersion = http11 })
+                (\buffer use -> do
+                    bufferMemory buffer `shouldSatisfy` P.eq fp
+                    use (owned $ pure "borrowed"))
+                (\_ -> pure ()) $ \request exchange -> do
+                    rejects (getRequestBodyChunk (S.requestMetadata request))
+                    withBodyBuffer exchange (Buffer fp 8) $ \source -> do
+                        pull source `shouldSatisfy` P.returns (P.eq "borrowed")
+                        withChunk source $ \_ -> rejects (pull source)
+                        rejects (withBodyBuffer exchange (Buffer fp 8) (\_ -> pure ()))
+                    rejects (withBodyBuffer exchange (Buffer fp 8) (\_ -> pure ()))
+                    S.respond exchange status200 [] (\_ -> pure ())
+    xfail "implementation follows in the paired change" $ it "expires retained sources, sinks, and the exchange" $ do
+        fp <- mallocForeignPtrBytes 8
+        sourceRef <- newIORef (owned $ pure "")
+        sinkRef <- newIORef (\_ -> pure ())
+        exchangeRef <- newIORef Nothing
+        getAcquisition >>= \acquisition -> newBufferPool acquisition (PoolSettings { bufferSize = positiveInt @8, ordinaryBufferCount = positiveInt @1, reserveBufferCount = positiveInt @1, setupBufferCount = positiveInt @1 }) >>= \resources -> do
+            withHTTP1Exchange resources (defaultRequest { httpVersion = http11 })
+                (\_ use -> use (owned $ pure "x"))
+                (\case
+                    ResponseBytes _ _ body -> body (\_ -> pure ())
+                    _ -> failTest "expected direct-byte response") $ \_ exchange -> do
+                    writeIORef exchangeRef (Just exchange)
+                    withBodyBuffer exchange (Buffer fp 8) $ \source -> writeIORef sourceRef source
+                    readIORef sourceRef >>= (rejects . pull)
+                    S.respond exchange status200 [] $ \sink -> writeIORef sinkRef sink
+                    readIORef sinkRef >>= (\sink -> rejects (sink "late"))
+                    rejects (S.respond exchange status200 [] (\_ -> pure ()))
+            Just exchange <- readIORef exchangeRef
+            rejects (S.respond exchange status200 [] (\_ -> pure ()))
+            rejects (withBodyBuffer exchange (Buffer fp 8) (\_ -> pure ()))
+    it "rejects HTTP/2 before using backend capabilities" $ do
+        called <- newIORef False
+        getAcquisition >>= \acquisition -> newBufferPool acquisition (PoolSettings { bufferSize = positiveInt @8, ordinaryBufferCount = positiveInt @1, reserveBufferCount = positiveInt @1, setupBufferCount = positiveInt @1 }) >>= \resources -> do
+            withHTTP1Exchange resources (defaultRequest { httpVersion = http11 })
+                (\_ use -> use (owned $ pure "")) (\_ -> pure ())
+                (\_ exchange -> S.respond exchange status200 [] (\_ -> pure ()))
+            rejects $ withHTTP1Exchange resources (defaultRequest { httpVersion = http20 })
+                (\_ use -> writeIORef called True >> use (owned $ pure ""))
+                (\_ -> writeIORef called True) (\_ _ -> writeIORef called True)
+            readIORef called `shouldSatisfy` P.returns (P.eq False)
+
+
+getAcquisition :: IO Context
+getAcquisition = newContext <$> getSystemTimerManager
