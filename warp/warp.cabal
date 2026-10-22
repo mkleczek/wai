@@ -60,6 +60,7 @@ library
         Network.Wai.Handler.Warp.Streaming
         Network.Wai.Handler.Warp.Streaming.Internal
         Network.Wai.Handler.Warp.Streaming.Input
+        Network.Wai.Handler.Warp.Streaming.InputContext
 
     other-modules:
         Network.Wai.Handler.Warp.Buffer
