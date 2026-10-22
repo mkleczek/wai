@@ -114,6 +114,25 @@ spec = describe "blocking transport callback ownership" $ do
         result <- B.concat . reverse <$> readIORef output
         B.isInfixOf " 500 " result `shouldSatisfy` P.eq True
 
+    xfail "implementation follows in the paired change" $ it "returns compatibility output storage before acquisition for the next request" $ do
+        pending <- newIORef "GET / HTTP/1.1\r\nHost: local\r\n\r\n"
+        base <- connection (\_ -> pure ())
+        let receive ptr capacity = do
+                bytes <- readIORef pending
+                if B.null bytes then do
+                    scratch <- readIORef (connWriteBuffer base)
+                    bufSize scratch `shouldSatisfy` P.eq 0
+                    pure 0
+                  else do
+                    let (part, rest) = B.splitAt capacity bytes
+                    B.useAsCString part $ \src -> copyBytes ptr (castPtr src) (B.length part)
+                    writeIORef pending rest
+                    pure (B.length part)
+            transport = base { connRecvInto = Just receive }
+        (getAcquisition >>= \acquisition -> newBufferPool acquisition (PoolSettings { bufferSize = positiveInt @8, ordinaryBufferCount = positiveInt @1, reserveBufferCount = positiveInt @1, setupBufferCount = positiveInt @1 }) >>= \resources ->
+            serveHTTP1Connection defaultSettings resources transport TCP (SockAddrInet 0 0)
+                (\_ exchange -> respondResponse exchange (responseLBS status200 [] "owned")))
+            `finally` (readIORef (connWriteBuffer base) >>= bufFree)
 
 getAcquisition :: IO Context
 getAcquisition = newContext <$> getSystemTimerManager

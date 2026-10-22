@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-module RunnerSupport (withServer, withServerSettings, receiveAll) where
+module RunnerSupport (withServer, withServerSettings, withServerSettingsAt, receiveAll) where
 
 import Control.Concurrent.Async (withAsync, cancel)
 import Control.Exception (bracket)
@@ -16,14 +16,19 @@ withServer :: BufferPool -> Streaming.Application -> (Socket -> IO a) -> IO a
 withServer = withServerSettings defaultSettings
 
 withServerSettings :: Settings -> BufferPool -> Streaming.Application -> (Socket -> IO a) -> IO a
-withServerSettings settings resources app action = bracket listener close $ \sock -> do
-    address <- getSocketName sock
-    withAsync (runHTTP1Socket (setGracefulCloseTimeout1 0 settings) resources sock app) $ \server ->
+withServerSettings settings resources app action =
+    withServerSettingsAt settings resources app $ \address ->
         bracket (socket AF_INET Stream defaultProtocol) close $ \client -> do
             connect client address
-            result <- timeout 5000000 (action client)
-            cancel server
-            maybe (fail "operation-stream socket test timed out") pure result
+            action client
+
+withServerSettingsAt :: Settings -> BufferPool -> Streaming.Application -> (SockAddr -> IO a) -> IO a
+withServerSettingsAt settings resources app action = bracket listener close $ \sock -> do
+    address <- getSocketName sock
+    withAsync (runHTTP1Socket (setGracefulCloseTimeout1 0 settings) resources sock app) $ \server -> do
+        result <- timeout 5000000 (action address)
+        cancel server
+        maybe (fail "operation-stream socket test timed out") pure result
   where
     listener = do
         sock <- socket AF_INET Stream defaultProtocol
