@@ -101,6 +101,40 @@ spec = describe "HTTP/1 operation exchange" $ do
                 (\_ -> writeIORef called True) (\_ _ -> writeIORef called True)
             readIORef called `shouldSatisfy` P.returns (P.eq False)
 
+    it "public withBody uses one pooled input region and returns it at scope exit" $ do
+        getAcquisition >>= \acquisition -> newBufferPool acquisition (PoolSettings { bufferSize = positiveInt @8, ordinaryBufferCount = positiveInt @1, reserveBufferCount = positiveInt @1, setupBufferCount = positiveInt @1 }) >>= \resources ->
+            withHTTP1Exchange resources (defaultRequest { httpVersion = http11 })
+                (\buffer use -> do
+                    bufferCapacity buffer `shouldSatisfy` P.eq 8
+                    use (owned $ pure "pooled")) (\_ -> pure ()) $ \request exchange -> do
+                    S.withBody exchange $ \source -> pull source `shouldSatisfy` P.returns (P.eq "pooled")
+                    withBuffer (S.requestBuffers request) $ \buffer -> bufferCapacity buffer `shouldSatisfy` P.eq 8
+                    S.respond exchange status200 [] (\_ -> pure ())
+    it "rejects concurrent pulls and joins a blocked reader before input detach" $ do
+        fp <- mallocForeignPtrBytes 8
+        started <- newEmptyMVar
+        blocked <- newEmptyMVar
+        detached <- newIORef False
+        sawDetached <- newIORef True
+        workerRef <- newIORef Nothing
+        getAcquisition >>= \acquisition -> newBufferPool acquisition (PoolSettings { bufferSize = positiveInt @8, ordinaryBufferCount = positiveInt @1, reserveBufferCount = positiveInt @1, setupBufferCount = positiveInt @1 }) >>= \resources ->
+            withHTTP1Exchange resources (defaultRequest { httpVersion = http11 })
+                (\_ use -> use
+                    (owned $ (putMVar started () >> takeMVar blocked >> pure "")
+                        `finally` (readIORef detached >>= writeIORef sawDetached))
+                    `finally` writeIORef detached True)
+                (\_ -> pure ()) $ \_ exchange -> do
+                    rejects $ withBodyBuffer exchange (Buffer fp 8) $ \source -> do
+                        worker <- async (pull source)
+                        writeIORef workerRef (Just worker)
+                        takeMVar started
+                        rejects (pull source)
+                    Just worker <- readIORef workerRef
+                    joined <- timeout 1000000 (waitCatch worker)
+                    isJust joined `shouldSatisfy` P.eq True
+                    readIORef sawDetached `shouldSatisfy` P.returns (P.eq False)
+                    S.respond exchange status200 [] (\_ -> pure ())
+
 
 getAcquisition :: IO Context
 getAcquisition = newContext <$> getSystemTimerManager
