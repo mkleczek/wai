@@ -154,7 +154,7 @@ spec = describe "HTTP/1 operation exchange" $ do
                     joined <- timeout 1000000 (waitCatch worker)
                     isJust joined `shouldSatisfy` P.eq True
 
-    xfail "ordinary response routing follows in the paired change" $ it "routes ordinary responses through the same one-shot gate and rejects raw upgrades" $ do
+    it "routes ordinary responses through the same one-shot gate and rejects raw upgrades" $ do
         sent <- newIORef False
         getAcquisition >>= \acquisition -> newBufferPool acquisition (PoolSettings { bufferSize = positiveInt @8, ordinaryBufferCount = positiveInt @1, reserveBufferCount = positiveInt @1, setupBufferCount = positiveInt @1 }) >>= \resources ->
             withHTTP1Exchange resources (defaultRequest { httpVersion = http11 })
