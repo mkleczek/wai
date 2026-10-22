@@ -132,33 +132,29 @@ readCSource (CSource src ref) = do
     go DoneChunking = return S.empty
 
     -- Get the length from the source, and then pass off control to withLen
-    getLen = do
-        bs <- readSource src
-        if S.null bs
-            then do
-                I.writeIORef ref $ assert False $ HaveLen 0
-                return S.empty
-            else do
-                (x, y) <-
-                    case S.break (== _lf) bs of
-                        (x, y)
-                            | S.null y -> do
-                                bs2 <- readSource' src
-                                return $
-                                    if S.null bs2
-                                        then (x, y)
-                                        else S.break (== _lf) $ bs `S.append` bs2
-                            | otherwise -> return (x, y)
-                let w =
-                        S.foldl' (\i c -> i * 16 + fromIntegral (hexToWord c)) 0 $
-                            S.takeWhile isHexDigit x
+    getLen = readSource src >>= scanLen 0 True
 
-                let y' = S.drop 1 y
-                y'' <-
-                    if S.null y'
-                        then readSource src
-                        else return y'
-                withLen w y''
+    -- Consume only framing into an integer before the next receive. Retaining
+    -- a ByteString prefix here would alias a supplied receive buffer and be
+    -- overwritten by that receive; concatenating it would also copy payload.
+    scanLen size prefix bs
+        | S.null bs = do
+            I.writeIORef ref DoneChunking
+            return S.empty
+        | otherwise = do
+            let (line, rest) = S.break (== _lf) bs
+                (size', prefix') = S.foldl' accumulate (size, prefix) line
+                accumulate (n, stillHex) byte =
+                    let hex = stillHex && isHexDigit byte
+                        n' = if hex then n * 16 + fromIntegral (hexToWord byte) else n
+                     in n' `seq` hex `seq` (n', hex)
+            size' `seq` prefix' `seq`
+                if S.null rest
+                    then readSource' src >>= scanLen size' prefix'
+                    else do
+                        let payload = S.drop 1 rest
+                        bytes <- if S.null payload then readSource src else pure payload
+                        withLen size' bytes
 
     hexToWord w
         | w <= _9 = w - _0
