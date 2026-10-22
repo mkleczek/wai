@@ -1,12 +1,14 @@
 module Network.Wai.Handler.Warp.Buffer (
     createWriteBuffer,
+    ensureWriteBuffer,
     allocateBuffer,
     freeBuffer,
     toBuilderBuffer,
     bufferIO,
 ) where
 
-import Data.IORef (IORef, readIORef)
+import Control.Exception (mask_)
+import Data.IORef (IORef, readIORef, writeIORef)
 import qualified Data.Streaming.ByteString.Builder.Buffer as B (Buffer (..))
 import Foreign.ForeignPtr
 import Foreign.Marshal.Alloc (free, mallocBytes)
@@ -32,6 +34,16 @@ createWriteBuffer size = do
 
 ----------------------------------------------------------------
 
+-- | Compatibility output is allocated only when a Builder/file path needs it.
+-- The caller owns the response writer exclusively.
+ensureWriteBuffer :: Int -> IORef WriteBuffer -> IO WriteBuffer
+ensureWriteBuffer size ref = mask_ $ do
+    current <- readIORef ref
+    if bufSize current > 0 then pure current else do
+        fresh <- createWriteBuffer (max 1 size)
+        writeIORef ref fresh
+        pure fresh
+
 -- | Allocating a buffer with malloc().
 allocateBuffer :: Int -> IO Buffer
 allocateBuffer = mallocBytes
@@ -47,7 +59,7 @@ freeBuffer = free
 
 toBuilderBuffer :: IORef WriteBuffer -> IO B.Buffer
 toBuilderBuffer writeBufferRef = do
-    writeBuffer <- readIORef writeBufferRef
+    writeBuffer <- ensureWriteBuffer 16384 writeBufferRef
     let ptr = bufBuffer writeBuffer
         size = bufSize writeBuffer
     fptr <- newForeignPtr_ ptr
