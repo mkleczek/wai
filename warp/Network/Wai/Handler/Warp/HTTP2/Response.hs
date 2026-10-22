@@ -42,6 +42,7 @@ fromResponse settings ii req rsp = do
         ResponseStream st rsphdr strmbdy -> do
             let rsphdr' = add date rsphdr
             return $ responseStream st rsphdr' method strmbdy
+        ResponseBytes{} -> E.throwIO (userError "ResponseBytes requires HTTP/1.1")
         _ -> error "ResponseRaw is not supported in HTTP/2"
     mh2data <- getHTTP2Data req
     case mh2data of

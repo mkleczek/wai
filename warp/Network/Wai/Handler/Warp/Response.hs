@@ -17,6 +17,9 @@ module Network.Wai.Handler.Warp.Response (
 ) where
 
 import qualified Control.Exception as E
+import qualified Data.ByteString.Char8 as S8
+import Numeric (showHex)
+import Network.Wai.Handler.Warp.Streaming.Gate
 import qualified Data.ByteString as S
 import Data.ByteString.Internal (toForeignPtr, unsafeCreate)
 import Data.ByteString.Builder (Builder, byteString)
@@ -27,7 +30,7 @@ import Data.ByteString.Builder.HTTP.Chunked (
  )
 import qualified Data.CaseInsensitive as CI
 import Data.Foldable (for_)
-import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Streaming.ByteString.Builder (
     newByteStringBuilderRecv,
     reuseBufferStrategy,
@@ -191,7 +194,9 @@ sendResponse settings conn ii th req reqidxhdr src response = do
         ResponseStream _ _ fb
             | isHead -> RspNoBody
             | otherwise -> RspStream fb needsChunked
-        ResponseBytes _ _ _ -> error "byte response not implemented"
+        ResponseBytes _ _ body
+            | isHead -> RspNoBody
+            | otherwise -> RspBytes body needsChunked
         ResponseRaw raw _ -> RspRaw raw src
     -- Should be False if (http10 && not hasLength), regardless of what
     -- the 'Connection' header says. (as long as the response should have a body)
@@ -264,6 +269,7 @@ data Rsp
     | RspFile FilePath (Maybe FilePart) IndexedRequestHeader (IO ())
     | RspBuilder Builder Bool
     | RspStream StreamingBody Bool
+    | RspBytes ((ByteString -> IO ()) -> IO ()) Bool
     | RspRaw (IO ByteString -> (ByteString -> IO ()) -> IO ()) (IO ByteString)
 
 ----------------------------------------------------------------
@@ -367,6 +373,41 @@ sendRsp conn _ th ver s hs rspidxhdr _ _ (RspStream streamingBody needsChunked) 
     addToCounter bytes ref =
         atomicModifyIORef' ref $ \old ->
             (old + fromIntegral bytes, ())
+
+----------------------------------------------------------------
+
+-- Byte writes bypass builders so producers may reuse their storage as soon
+-- as send returns. Framing is completed synchronously around each slice.
+sendRsp conn _ th ver status headers indexed _ _ (RspBytes body chunked) = do
+    expected <- case lookup Header.hContentLength headers of
+        Nothing -> pure Nothing
+        Just value -> case S8.readInteger value of
+            Just (size, rest) | size >= 0 && S.null rest -> pure (Just size)
+            _ -> ioError (userError "invalid Content-Length for responseBytes")
+    let finalHeaders = if chunked then addTransferEncoding indexed headers else headers
+    composeHeader ver status finalHeaders >>= connSendAll conn
+    sent <- newIORef 0
+    active <- newOperationGate
+    let exclusively = runOperation active
+        write bytes = exclusively $ do
+            unless (S.null bytes) $ do
+                previous <- readIORef sent
+                let total = previous + fromIntegral (S.length bytes)
+                for_ expected $ \size -> when (total > size) $
+                    ioError (userError "responseBytes exceeded Content-Length")
+                when chunked $ sendFragment conn th (S8.pack (showHex (S.length bytes) "\r\n"))
+                sendFragment conn th bytes
+                when chunked $ sendFragment conn th "\r\n"
+                writeIORef sent total
+        expire = do
+            busy <- closeOperationGate active
+            when busy (ioError (userError "responseBytes returned with an unfinished write"))
+    body write `E.finally` expire
+    total <- readIORef sent
+    for_ expected $ \size -> when (total /= size) $
+        ioError (userError "responseBytes ended before Content-Length")
+    when chunked $ sendFragment conn th "0\r\n\r\n"
+    pure (Just status, Just total)
 
 ----------------------------------------------------------------
 
