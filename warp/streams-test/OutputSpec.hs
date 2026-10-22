@@ -29,6 +29,7 @@ connection send = do
     pure Connection
         { connSendAll = send, connSendMany = mapM_ send
         , connSendFile = \_ _ _ _ _ -> pure (), connClose = pure ()
+        , connRecvInto = Nothing
         , connRecv = pure "", connRecvBuf = \_ _ -> pure False
         , connWriteBuffer = buffer, connHTTP2 = h2
         , connMySockAddr = SockAddrInet 0 0, connAppsInProgress = apps

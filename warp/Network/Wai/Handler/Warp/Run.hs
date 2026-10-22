@@ -38,6 +38,7 @@ import Network.Socket (
 #endif
 #endif
     getSocketName,
+    recvBuf,
     setSocketOption,
     withSocketsDo,
  )
@@ -98,6 +99,7 @@ socketConnection set s = do
             , connClose = close s
 #endif
             , connRecv = receive' bufferPool ss appsInProgress
+            , connRecvInto = Just (recvBuf s)
             , connRecvBuf = \_ _ -> return True -- obsoleted
             , connWriteBuffer = writeBufferRef
             , connHTTP2 = isH2

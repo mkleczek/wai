@@ -37,6 +37,7 @@ main = do
                 , connSendFile = \_ _ _ _ _ -> return ()
                 , connClose = return ()
                 , connRecv = return ""
+                , connRecvInto = Nothing
                 , connRecvBuf = \_ _ -> return True
                 , connWriteBuffer = writeBuf
                 , connHTTP2 = http2Ref

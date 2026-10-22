@@ -119,6 +119,11 @@ data Connection = Connection
     -- 'connClose' is called.
     , connRecv :: Recv
     -- ^ The connection receiving function. This returns "" for EOF or exceptions.
+    , connRecvInto :: Maybe (Buffer -> BufSize -> IO Int)
+    -- ^ Optional blocking receive into borrowed storage. The callback may drive
+    -- cross-direction transport progress (for example TLS writes while reading).
+    -- It must not retain the pointer and must return a count in [0, capacity].
+    -- Unsupported transports use Nothing; ordinary receiving is unchanged.
     , connRecvBuf :: RecvBuf
     -- ^ Obsoleted.
     , connWriteBuffer :: IORef WriteBuffer
