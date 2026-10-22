@@ -89,7 +89,7 @@ spec = describe "HTTP/1 operation-stream runner" $ do
             B.isSuffixOf "ok" response `shouldSatisfy` P.eq True
             timeout 1000000 (wait server) `shouldSatisfy` P.returns (P.eq (Just ()))
 
-    xfail "implementation follows in the paired change" $ it "continues expected uploads before draining an unpulled body scope" $ do
+    it "continues expected uploads before draining an unpulled body scope" $ do
         getAcquisition >>= \acquisition -> newBufferPool acquisition (PoolSettings { bufferSize = positiveInt @8, ordinaryBufferCount = positiveInt @1, reserveBufferCount = positiveInt @1, setupBufferCount = positiveInt @1 }) >>= \resources -> do
             let app _ exchange = do
                     S.withBody exchange (\_ -> pure ())
