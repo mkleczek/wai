@@ -58,6 +58,7 @@ library
         Network.Wai.Handler.Warp
         Network.Wai.Handler.Warp.Internal
         Network.Wai.Handler.Warp.Streaming.Internal
+        Network.Wai.Handler.Warp.Streaming.Input
 
     other-modules:
         Network.Wai.Handler.Warp.Streaming.Gate
@@ -447,7 +448,7 @@ test-suite streams
     type: exitcode-stdio-1.0
     main-is: Main.hs
     hs-source-dirs: streams-test
-    other-modules: ExchangeSpec
+    other-modules: ExchangeSpec, InputSpec
     default-language: Haskell2010
     ghc-options: -Wall -threaded -F -pgmF skeletest-preprocessor
     build-tool-depends: skeletest:skeletest-preprocessor
