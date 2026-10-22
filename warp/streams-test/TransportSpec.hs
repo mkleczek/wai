@@ -86,6 +86,34 @@ spec = describe "blocking transport callback ownership" $ do
         result <- B.concat . reverse <$> readIORef output
         B.isSuffixOf "abc" result `shouldSatisfy` P.eq True
 
+    it "closes failed body operations without reading after supplied storage is returned" $ do
+        fp <- mallocForeignPtrBytes 8
+        packets <- newIORef ["POST / HTTP/1.1\r\nHost: local\r\nContent-Length: 6\r\nConnection: close\r\n\r\n", "abc", "def"]
+        output <- newIORef []
+        base <- connection $ \bytes -> evaluate (B.copy bytes) >>= \owned -> modifyIORef' output (owned :)
+        let receive ptr capacity = do
+                chunks <- readIORef packets
+                case chunks of
+                    [] -> pure 0
+                    chunk : rest -> do
+                        let (part, extra) = B.splitAt capacity chunk
+                        B.useAsCString part $ \src -> copyBytes ptr (castPtr src) (B.length part)
+                        writeIORef packets (if B.null extra then rest else extra : rest)
+                        pure (B.length part)
+            transport = base { connRecvInto = Just receive }
+            settings = setOnException (\_ _ -> pure ()) defaultSettings
+            application _ exchange =
+                withBodyBuffer exchange (Buffer fp 8) (\source -> do
+                    withChunk source (\chunk -> chunk `shouldSatisfy` P.eq "abc")
+                    ioError (userError "application failed with unread body"))
+                `finally` withForeignPtr fp (\ptr -> fillBytes ptr 88 8)
+        (getAcquisition >>= \acquisition -> newBufferPool acquisition (PoolSettings { bufferSize = positiveInt @8, ordinaryBufferCount = positiveInt @1, reserveBufferCount = positiveInt @1, setupBufferCount = positiveInt @1 }) >>= \resources ->
+            serveHTTP1Connection settings resources transport TCP (SockAddrInet 0 0) application)
+            `finally` (readIORef (connWriteBuffer transport) >>= bufFree)
+        readIORef packets `shouldSatisfy` P.returns (P.eq ["def"])
+        result <- B.concat . reverse <$> readIORef output
+        B.isInfixOf " 500 " result `shouldSatisfy` P.eq True
+
 
 getAcquisition :: IO Context
 getAcquisition = newContext <$> getSystemTimerManager

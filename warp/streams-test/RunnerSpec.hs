@@ -92,6 +92,39 @@ spec = describe "HTTP/1 operation-stream runner" $ do
                 response <- receiveAll client
                 B.isSuffixOf "ok" response `shouldSatisfy` P.eq True
 
+    it "owns borrowed chunked pipeline framing before the input buffer is poisoned" $ do
+        fp <- mallocForeignPtrBytes 8
+        selected <- newEmptyMVar
+        getAcquisition >>= \acquisition -> newBufferPool acquisition (PoolSettings { bufferSize = positiveInt @8, ordinaryBufferCount = positiveInt @1, reserveBufferCount = positiveInt @1, setupBufferCount = positiveInt @1 }) >>= \resources -> do
+            let app req exchange
+                    | rawPathInfo (S.requestMetadata req) == "/one" = do
+                        withBodyBuffer exchange (Buffer fp 8) $ \_ -> do
+                            putMVar selected ()
+                            S.respond exchange status200 [("Content-Length", "3")] (\sink -> sink "one")
+                        withForeignPtr fp $ \ptr -> fillBytes ptr 88 8
+                    | otherwise = S.respond exchange status200 [("Content-Length", "3")] (\sink -> sink "two")
+            withServer resources app $ \client -> do
+                NS.sendAll client "POST /one HTTP/1.1\r\nHost: local\r\nTransfer-Encoding: chunked\r\n\r\n"
+                takeMVar selected
+                NS.sendAll client "3\r\nabc\r\n0\r\n\r\nGET /two HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n"
+                response <- receiveAll client
+                B.isInfixOf "\r\n\r\noneHTTP/1.1 200" response `shouldSatisfy` P.eq True
+                B.isSuffixOf "two" response `shouldSatisfy` P.eq True
+    it "times out idle keep-alive header reads without holding body storage" $ do
+        getAcquisition >>= \acquisition -> newBufferPool acquisition (PoolSettings { bufferSize = positiveInt @8, ordinaryBufferCount = positiveInt @1, reserveBufferCount = positiveInt @1, setupBufferCount = positiveInt @1 }) >>= \resources -> do
+                let app _ exchange = S.respond exchange status200 [("Content-Length", "2")] (\sink -> sink "ok")
+                    receiveReply client accumulated = do
+                        chunk <- NS.recv client 4096
+                        let result = accumulated <> chunk
+                        if B.isSuffixOf "ok" result || B.null chunk then pure result
+                            else receiveReply client result
+                withServerSettings (setTimeout 1 defaultSettings) resources app $ \client -> do
+                    NS.sendAll client "GET / HTTP/1.1\r\nHost: local\r\n\r\n"
+                    response <- receiveReply client ""
+                    B.isSuffixOf "ok" response `shouldSatisfy` P.eq True
+                    timeout 300000 (withRequestBuffers resources (\_ -> pure ())) `shouldSatisfy` P.returns (P.eq (Just ()))
+                    receiveAll client `shouldSatisfy` P.returns (P.eq "")
+
 
 getAcquisition :: IO Context
 getAcquisition = newContext <$> getSystemTimerManager
