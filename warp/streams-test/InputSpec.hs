@@ -34,7 +34,7 @@ pull source = withChunk source (evaluate . B.copy)
 
 spec :: Spec
 spec = describe "operation-local supplied HTTP body parser" $ do
-    xfail "implementation follows in the paired change" $ it "uses supplied storage and limits known-length receives before pipelined bytes" $ do
+    it "uses supplied storage and limits known-length receives before pipelined bytes" $ do
         fp <- mallocForeignPtrBytes 8
         receive <- script ["abcNEXT"]
         withRequestBodyBuffer (KnownLength 3) "" receive (Buffer fp 8) $ \source leftovers -> do
@@ -46,7 +46,7 @@ spec = describe "operation-local supplied HTTP body parser" $ do
             leftovers `shouldSatisfy` P.returns (P.eq "")
         withRequestBodyBuffer (KnownLength 4) "" receive (Buffer fp 8) $ \source _ ->
             pull source `shouldSatisfy` P.returns (P.eq "NEXT")
-    xfail "implementation follows in the paired change" $ it "reuses the chunk decoder across fragmented framing" $ do
+    it "reuses the chunk decoder across fragmented framing" $ do
         fp <- mallocForeignPtrBytes 8
         receive <- script ["3\r", "\nabc\r", "\n0\r\n\r\nNEXT"]
         withRequestBodyBuffer ChunkedBody "" receive (Buffer fp 8) $ \source leftovers -> do

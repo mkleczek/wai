@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE CPP #-}
 
 module Network.Wai.Handler.Warp.Conduit where
@@ -98,7 +99,7 @@ readCSource (CSource src ref) = do
     go DoneChunking = return S.empty
 
     getLen = do
-        len <- chunkSize =<< requireLine
+        len <- chunkSize =<< requireLine sizeLine (SizeDigits 0 0)
         if len == 0
             then do
                 -- Everything up to the empty line which ends the trailer
@@ -130,75 +131,95 @@ readCSource (CSource src ref) = do
     -- and take 0 for the rest, so a line which is no chunk size at all
     -- -- a request line, say -- ended the body and left the rest of it
     -- to be read as the next request.
-    chunkSize line
-        | S.null digits = throwIO BadChunkedBody
-        | not (S.null ext), S.head ext /= _semicolon = throwIO BadChunkedBody
-        | otherwise =
-            maybe (throwIO BadChunkedBody) (return . fromIntegral) $
-                S.foldl' accumulate (Just (0 :: Int)) digits
+    chunkSize (SizeDigits digits n) | digits > 0 = return $ fromIntegral n
+    chunkSize (SizeExtensions n) = return $ fromIntegral n
+    chunkSize _ = throwIO BadChunkedBody
+
+    sizeLine (SizeDigits digits n) w
+        | isHexDigit w =
+            -- A chunk warp cannot measure is a chunk warp cannot read.
+            if n > (maxBound - d) `div` 16
+                then BadSize
+                else SizeDigits (digits + 1) $! n * 16 + d
+        | w == _semicolon && digits > 0 = SizeExtensions n
+        | otherwise = BadSize
       where
-        (digits, ext) = S.span isHexDigit line
-        accumulate Nothing _ = Nothing
-        -- A chunk warp cannot measure is a chunk warp cannot read.
-        accumulate (Just n) w
-            | n > (maxBound - d) `div` 16 = Nothing
-            | otherwise = Just $! n * 16 + d
-          where
-            d = fromIntegral (hexToWord w)
+        d = fromIntegral (hexToWord w)
+    sizeLine st@(SizeExtensions _) _ = st
+    sizeLine BadSize _ = BadSize
 
     -- The CRLF which ends chunk-data. Warp used to put anything else
     -- back and read it as the next chunk size, so a chunk that was not
     -- closed off ended the body early.
     dropCRLF = do
-        line <- requireLine
-        unless (S.null line) $ throwIO BadChunkedBody
+        isEmptyLine <- requireLine (\_ _ -> False) True
+        unless isEmptyLine $ throwIO BadChunkedBody
 
     dropTrailers total = do
-        mline <- readLine
-        case mline of
+        mlen <- readLine (\n _ -> n + 1) (0 :: Int)
+        case mlen of
             -- A client which leaves out the last CRLF and closes has
             -- nothing left to hide behind it.
             Nothing -> return ()
-            Just line -> unless (S.null line) $ do
-                let total' = total + S.length line
+            Just len -> unless (len == 0) $ do
+                let total' = total + len
                 when (total' > maxTrailerLength) $ throwIO OverLargeHeader
                 dropTrailers total'
 
-    requireLine = readLine >>= maybe (throwIO ConnectionClosedByPeer) return
+    requireLine step z = readLine step z >>= maybe (throwIO ConnectionClosedByPeer) return
 
     -- One line of the chunked framing: up to the next LF, without it or
     -- the CR before it, leaving the rest of what was read in the source.
     -- 'Nothing' when the connection ends where a line was to begin.
     -- Warp used to give up one read short of the LF, which mis-read
     -- every size line that arrived in more than two pieces.
-    readLine = loop 0 id
+    --
+    -- The line is folded as it is read and no piece of it is kept for
+    -- the next receive. A supplied receive buffer is overwritten by
+    -- that receive, and concatenating the pieces would copy them.
+    readLine :: (a -> Word8 -> a) -> a -> IO (Maybe a)
+    readLine step = loop 0 False
       where
-        loop total front = do
+        loop !total !cr !acc = do
             bs <- readSource src
             if S.null bs
                 then
                     if total == 0
                         then return Nothing
                         else throwIO ConnectionClosedByPeer
-                else case S.elemIndex _lf bs of
-                    Nothing -> do
-                        let total' = total + S.length bs
-                        when (total' > maxChunkLineLength) $ throwIO OverLargeHeader
-                        loop total' (front . (bs :))
-                    Just ix -> do
-                        leftoverSource src $ S.drop (ix + 1) bs
-                        let line = S.concat $ front [S.take ix bs]
-                        when (S.length line > maxChunkLineLength) $
-                            throwIO OverLargeHeader
-                        return $ Just $ dropCR line
-        dropCR bs = case S.unsnoc bs of
-            Just (bs', w) | w == _cr -> bs'
-            _ -> bs
+                else do
+                    let (line, rest) = S.break (== _lf) bs
+                        total' = total + S.length line
+                        LineFold cr' acc' = S.foldl' feed (LineFold cr acc) line
+                    when (total' > maxChunkLineLength) $ throwIO OverLargeHeader
+                    if S.null rest
+                        then loop total' cr' acc'
+                        else do
+                            leftoverSource src $ S.drop 1 rest
+                            return $ Just acc'
+        -- A CR is only part of the line if something follows it.
+        feed (LineFold cr acc) w =
+            let acc' = if cr then step acc _cr else acc
+             in if w == _cr
+                    then LineFold True acc'
+                    else LineFold False $! step acc' w
 
     hexToWord w
         | w <= _9 = w - _0
         | w <= _F = w - 55
         | otherwise = w - 87
+
+-- | A chunk-size line as it is read: the digits so far, then its extensions.
+data SizeLine
+    = -- | The number of digits and the size they make
+      SizeDigits !Int !Int
+    | -- | The size
+      SizeExtensions !Int
+    | BadSize
+
+-- | A line as it is folded: whether its last byte is a CR still to be
+--   decided on, and the fold so far.
+data LineFold a = LineFold !Bool !a
 
 isHexDigit :: Word8 -> Bool
 isHexDigit w =
