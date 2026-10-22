@@ -119,6 +119,7 @@ module Network.Wai.Handler.Warp.Internal (
     http2server,
     withII,
     serveConnection,
+    serveHTTP1Connection,
     pReadMaker,
 ) where
 

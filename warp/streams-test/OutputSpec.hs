@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-module OutputSpec (spec) where
+module OutputSpec (spec, connection) where
 
 import Control.Exception (SomeException, try, evaluate)
 import Control.Concurrent.STM (newTVarIO)

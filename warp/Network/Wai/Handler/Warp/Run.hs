@@ -512,6 +512,16 @@ serveConnection
     -> IO ()
 serveConnection = serveConnectionWith Nothing
 
+-- | Serve an already-established blocking transport. The caller owns closing
+-- the connection and freeing any compatibility write scratch after return.
+serveHTTP1Connection :: Settings -> StreamingBuffers.BufferPool -> Connection -> Transport -> SockAddr
+    -> Streaming.Application -> IO ()
+serveHTTP1Connection settings resources conn transport addr application =
+    withII settings $ \info ->
+        T.withHandleKillThread (timeoutManager info) (pure ()) $ \handle ->
+            serveConnectionWith (Just (resources, application)) conn info handle addr transport settings
+                (\_ _ -> error "ordinary application unavailable in HTTP/1 operation runner")
+
 serveConnectionWith :: Maybe (StreamingBuffers.BufferPool, Streaming.Application) -> Connection
     -> InternalInfo -> T.Handle -> SockAddr -> Transport -> Settings -> Application -> IO ()
 serveConnectionWith (Just (resources, handler)) conn ii th addr transport settings _ = do
