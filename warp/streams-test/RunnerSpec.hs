@@ -28,7 +28,7 @@ pull source = withChunk source (evaluate . B.copy)
 
 spec :: Spec
 spec = describe "HTTP/1 operation-stream runner" $ do
-    xfail "implementation follows in the paired change" $ it "receives post-header bytes directly into the admitted input buffer" $ do
+    it "receives post-header bytes directly into the admitted input buffer" $ do
         fp <- mallocForeignPtrBytes 8
         selected <- newEmptyMVar
         observed <- newEmptyMVar
@@ -47,7 +47,7 @@ spec = describe "HTTP/1 operation-stream runner" $ do
                 response <- receiveAll client
                 B.isSuffixOf "abc" response `shouldSatisfy` P.eq True
             takeMVar observed `shouldSatisfy` P.returns (P.eq (True, "abc"))
-    xfail "implementation follows in the paired change" $ it "drains unread bodies and preserves one bounded pipeline prefix across buffer reuse" $ do
+    it "drains unread bodies and preserves one bounded pipeline prefix across buffer reuse" $ do
         count <- newIORef (0 :: Int)
         getAcquisition >>= \acquisition -> newBufferPool acquisition (PoolSettings { bufferSize = positiveInt @8, ordinaryBufferCount = positiveInt @1, reserveBufferCount = positiveInt @1, setupBufferCount = positiveInt @1 }) >>= \resources -> do
             let app req exchange = do
