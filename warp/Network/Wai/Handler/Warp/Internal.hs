@@ -41,6 +41,7 @@ module Network.Wai.Handler.Warp.Internal (
     -- * Connection
     Connection (..),
     socketConnection,
+    socketConnectionHTTP1,
 
     -- ** Receive
     Recv,
