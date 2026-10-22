@@ -48,6 +48,8 @@ import Network.Socket (gracefulClose)
 import Network.Socket.BufferPool
 import qualified Network.Socket.ByteString as Sock
 import Network.Wai
+import qualified Network.Streaming.BufferPool as StreamingBuffers
+import qualified Network.Wai.Streaming as Streaming
 import System.Environment (lookupEnv)
 import System.IO.Error (ioeGetErrorType)
 import qualified System.TimeManager as T
@@ -58,7 +60,7 @@ import Network.Wai.Handler.Warp.Counter
 import qualified Network.Wai.Handler.Warp.Date as D
 import qualified Network.Wai.Handler.Warp.FdCache as F
 import qualified Network.Wai.Handler.Warp.FileInfoCache as I
-import Network.Wai.Handler.Warp.HTTP1 (http1)
+import Network.Wai.Handler.Warp.HTTP1 (http1, http1Streaming)
 import Network.Wai.Handler.Warp.HTTP2 (http2)
 import Network.Wai.Handler.Warp.HTTP2.Types (isHTTP2)
 import Network.Wai.Handler.Warp.Imports hiding (readInt)
@@ -149,22 +151,19 @@ makeGracefulRecv sock pool ss appsInProgress = do
     tryFastPath <- not <$> readShuttingDown (serverShuttingDown ss)
     if tryFastPath then do
         mbs <- receiveNoWait sock pool
-        case mbs of
-          Just bs -> return bs
-          Nothing -> slowPath
+        maybe slowPath return mbs
       else slowPath
   where
     slowPath = makeGracefulRecvSlow sock pool ss appsInProgress
 
 makeGracefulRecvSlow :: Socket -> BufferPool -> ServerState -> TVar Int -> Recv
 makeGracefulRecvSlow sock pool ss appsInProgress = do
-    sockWait <-
 #if !WINDOWS && MIN_VERSION_network(3,2,2)
-        waitReadSocketSTM sock
+    sockWait <- waitReadSocketSTM sock
 #else
         -- FIXME: 'waitReadSocketSTM' doesn't work on WINDOWS, and actually
         -- blocks indefinitely, so we fall back to going straight to 'recv'.
-        pure (pure ())
+    let sockWait = pure ()
 #endif
     isShuttingDown <- atomically $
         -- when shutting down
@@ -214,6 +213,12 @@ runSettings set app =
                 runSettingsSocket set socket app
             )
 
+-- | HTTP/1 operation transport construction. Compatibility scratch becomes
+-- lazy in the following storage change; the protocol route already bypasses
+-- legacy receive and protocol sniffing.
+socketConnectionHTTP1 :: Settings -> Socket -> IO Connection
+socketConnectionHTTP1 = socketConnection
+
 -- | This installs a shutdown handler for the given socket and
 -- calls 'runSettingsConnection' with the default connection setup action
 -- which handles plain (non-cipher) HTTP.
@@ -226,17 +231,26 @@ runSettings set app =
 -- Note that the 'settingsPort' will still be passed to 'Application's via the
 -- 'serverPort' record.
 runSettingsSocket :: Settings -> Socket -> Application -> IO ()
-runSettingsSocket oldSettings@Settings{settingsAccept = accept'} socket app = do
+runSettingsSocket = runSettingsSocketWith Nothing
+
+runSettingsSocketWith :: Maybe (StreamingBuffers.BufferPool, Streaming.Application)
+    -> Settings -> Socket -> Application -> IO ()
+runSettingsSocketWith streaming oldSettings@Settings{settingsAccept = accept'} socket app = do
     settingsInstallShutdownHandler oldSettings closeListenSocket
     (_, newSettings) <- makeServerState oldSettings
-    runSettingsConnection newSettings (getConn newSettings) app
+    let maker = do
+            (conn, addr) <- getConn newSettings
+            pure (pure (conn, TCP), addr)
+    runSettingsConnectionMakerSecureWith streaming newSettings maker app
   where
     getConn set = do
         (s, sa) <- accept' socket
         setSocketCloseOnExec s
         -- NoDelay causes an error for AF_UNIX.
         setSocketOption s NoDelay 1 `E.catch` throughAsync (return ())
-        conn <- socketConnection set s
+        conn <- case streaming of
+            Nothing -> socketConnection set s
+            Just _ -> socketConnectionHTTP1 set s
         return (conn, sa)
 
     closeListenSocket = close socket
@@ -252,7 +266,7 @@ runSettingsSocket oldSettings@Settings{settingsAccept = accept'} socket app = do
 -- @since 1.3.5
 runSettingsConnection
     :: Settings -> IO (Connection, SockAddr) -> Application -> IO ()
-runSettingsConnection set getConn app = runSettingsConnectionMaker set getConnMaker app
+runSettingsConnection set getConn = runSettingsConnectionMaker set getConnMaker
   where
     getConnMaker = do
         (conn, sa) <- getConn
@@ -277,12 +291,16 @@ runSettingsConnectionMaker x y =
 -- @since 2.1.4
 runSettingsConnectionMakerSecure
     :: Settings -> IO (IO (Connection, Transport), SockAddr) -> Application -> IO ()
-runSettingsConnectionMakerSecure oldSettings getConnMaker app = do
+runSettingsConnectionMakerSecure = runSettingsConnectionMakerSecureWith Nothing
+
+runSettingsConnectionMakerSecureWith :: Maybe (StreamingBuffers.BufferPool, Streaming.Application)
+    -> Settings -> IO (IO (Connection, Transport), SockAddr) -> Application -> IO ()
+runSettingsConnectionMakerSecureWith streaming oldSettings getConnMaker app = do
     settingsBeforeMainLoop oldSettings
     (ServerState{serverConnectionCounter}, newSettings) <- makeServerState oldSettings
     withII newSettings $ \ii ->
         initFdExhaustionRef >>=
-            acceptConnection newSettings getConnMaker app serverConnectionCounter ii
+            acceptConnectionWith streaming newSettings getConnMaker app serverConnectionCounter ii
 
 -- | Running an action with internal info.
 --
@@ -331,7 +349,12 @@ acceptConnection
         -- when we hit an 'IOError' with 'eMFILE' in the case that Warp is not
         -- the reason the file descriptors are exhausted.
     -> IO ()
-acceptConnection set getConnMaker app counter ii fdRef = do
+acceptConnection = acceptConnectionWith Nothing
+
+acceptConnectionWith :: Maybe (StreamingBuffers.BufferPool, Streaming.Application) -> Settings
+    -> IO (IO (Connection, Transport), SockAddr) -> Application -> Counter
+    -> InternalInfo -> IORef FdExhaustion -> IO ()
+acceptConnectionWith streaming set getConnMaker app counter ii fdRef = do
     -- First mask all exceptions in acceptLoop. This is necessary to
     -- ensure that no async exception is throw between the call to
     -- acceptNewConnection and the registering of connClose.
@@ -358,7 +381,7 @@ acceptConnection set getConnMaker app counter ii fdRef = do
         case mx of
             Nothing -> return ()
             Just (mkConn, addr) -> do
-                fork set mkConn addr app counter ii
+                forkWith streaming set mkConn addr app counter ii
                 acceptLoop
 
     acceptNewConnection = do
@@ -412,7 +435,11 @@ fork
     -> Counter
     -> InternalInfo
     -> IO ()
-fork set mkConn addr app counter ii = do
+fork = forkWith Nothing
+
+forkWith :: Maybe (StreamingBuffers.BufferPool, Streaming.Application) -> Settings
+    -> IO (Connection, Transport) -> SockAddr -> Application -> Counter -> InternalInfo -> IO ()
+forkWith streaming set mkConn addr app counter ii = do
     -- Count the connection here rather than in the thread below.  The
     -- accept loop does not wait for that thread to be scheduled, so
     -- counting there leaves a window in which the connection is accepted
@@ -462,9 +489,9 @@ fork set mkConn addr app counter ii = do
             $ \goingon ->
                 -- Actually serve this connection.  bracket with closeConn
                 -- above ensures the connection is closed.
-                when goingon $ serveConnection conn ii th addr transport set app
+                when goingon $ serveConnectionWith streaming conn ii th addr transport set app
 
-    onOpen adr = settingsOnOpen set adr
+    onOpen = settingsOnOpen set
     onClose adr _ = settingsOnClose set adr
 
 serveConnection
@@ -476,7 +503,21 @@ serveConnection
     -> Settings
     -> Application
     -> IO ()
-serveConnection conn ii th origAddr transport settings app = do
+serveConnection = serveConnectionWith Nothing
+
+serveConnectionWith :: Maybe (StreamingBuffers.BufferPool, Streaming.Application) -> Connection
+    -> InternalInfo -> T.Handle -> SockAddr -> Transport -> Settings -> Application -> IO ()
+serveConnectionWith (Just (resources, handler)) conn ii th addr transport settings _ = do
+    when (isHTTP2 transport) $ ioError (userError "HTTP/1 runner cannot use an HTTP/2 transport")
+    tid <- myThreadId
+    labelThread tid ("Warp HTTP/1.1 streams " ++ show addr)
+    let apps = connAppsInProgress conn
+        application req exchange = E.bracket_
+            (atomically $ modifyTVar' apps (+1))
+            (atomically $ modifyTVar' apps (subtract 1))
+            (handler req exchange)
+    http1Streaming resources settings ii conn transport application addr th
+serveConnectionWith Nothing conn ii th origAddr transport settings app = do
     -- fixme: Upgrading to HTTP/2 should be supported.
     tid <- myThreadId
     (h2, bs) <-
@@ -490,8 +531,8 @@ serveConnection conn ii th origAddr transport settings app = do
     let appsInProgress = connAppsInProgress conn
         app' req rsp =
             E.bracket_
-                (atomically $ modifyTVar' appsInProgress $ (+ 1))
-                (atomically $ modifyTVar' appsInProgress $ \i -> (i - 1))
+                (atomically $ modifyTVar' appsInProgress (+ 1))
+                (atomically $ modifyTVar' appsInProgress $ \i -> i - 1)
                 $ app req rsp
     if settingsHTTP2Enabled settings && h2
         then do
