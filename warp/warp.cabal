@@ -440,3 +440,15 @@ benchmark response
 
     if impl(ghc >=8)
         default-extensions: Strict StrictData
+
+-- Focused operation-stream contract tests.
+test-suite streams
+    type: exitcode-stdio-1.0
+    main-is: Main.hs
+    hs-source-dirs: streams-test
+    other-modules: ExchangeSpec
+    default-language: Haskell2010
+    ghc-options: -Wall -threaded -F -pgmF skeletest-preprocessor
+    build-tool-depends: skeletest:skeletest-preprocessor
+    build-depends: base, warp, wai, streaming-io, resource-admission, bytestring, http-types,
+                   skeletest >=0.4.2 && <0.5

@@ -145,6 +145,7 @@ data Response
     = ResponseFile H.Status H.ResponseHeaders FilePath (Maybe FilePart)
     | ResponseBuilder H.Status H.ResponseHeaders Builder
     | ResponseStream H.Status H.ResponseHeaders StreamingBody
+    | ResponseBytes H.Status H.ResponseHeaders ((B.ByteString -> IO ()) -> IO ())
     | ResponseRaw (IO B.ByteString -> (B.ByteString -> IO ()) -> IO ()) Response
 
 -- | Represents a streaming HTTP response body. It's a function of two

@@ -223,6 +223,7 @@ responseStatus :: Response -> H.Status
 responseStatus (ResponseFile s _ _ _) = s
 responseStatus (ResponseBuilder s _ _) = s
 responseStatus (ResponseStream s _ _) = s
+responseStatus (ResponseBytes s _ _) = s
 responseStatus (ResponseRaw _ res) = responseStatus res
 
 -- | Accessing 'H.ResponseHeaders' in 'Response'.
@@ -232,6 +233,7 @@ responseHeaders :: Response -> H.ResponseHeaders
 responseHeaders (ResponseFile _ hs _ _) = hs
 responseHeaders (ResponseBuilder _ hs _) = hs
 responseHeaders (ResponseStream _ hs _) = hs
+responseHeaders (ResponseBytes _ hs _) = hs
 responseHeaders (ResponseRaw _ res) = responseHeaders res
 
 -- | Converting the body information in 'Response' to a 'StreamingBody'.
@@ -270,6 +272,8 @@ responseToStream (ResponseFile s h fp Nothing) =
     )
 responseToStream (ResponseBuilder s h b) =
     (s, h, \withBody -> withBody $ \sendChunk _flush -> sendChunk b)
+responseToStream (ResponseBytes s h body) =
+    (s, h, \use -> use $ \send _ -> body (send . byteString . B.copy))
 responseToStream (ResponseRaw _ res) = responseToStream res
 
 -- | Apply the provided function to the response header list of the Response.
@@ -280,6 +284,7 @@ mapResponseHeaders
 mapResponseHeaders f (ResponseFile s h b1 b2) = ResponseFile s (f h) b1 b2
 mapResponseHeaders f (ResponseBuilder s h b) = ResponseBuilder s (f h) b
 mapResponseHeaders f (ResponseStream s h b) = ResponseStream s (f h) b
+mapResponseHeaders f (ResponseBytes s h b) = ResponseBytes s (f h) b
 mapResponseHeaders _ r@(ResponseRaw _ _) = r
 
 -- | Apply the provided function to the response status of the Response.
@@ -289,6 +294,7 @@ mapResponseStatus :: (H.Status -> H.Status) -> Response -> Response
 mapResponseStatus f (ResponseFile s h b1 b2) = ResponseFile (f s) h b1 b2
 mapResponseStatus f (ResponseBuilder s h b) = ResponseBuilder (f s) h b
 mapResponseStatus f (ResponseStream s h b) = ResponseStream (f s) h b
+mapResponseStatus f (ResponseBytes s h b) = ResponseBytes (f s) h b
 mapResponseStatus _ r@(ResponseRaw _ _) = r
 
 ----------------------------------------------------------------
