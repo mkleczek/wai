@@ -89,6 +89,23 @@ spec = describe "HTTP/1 operation-stream runner" $ do
             B.isSuffixOf "ok" response `shouldSatisfy` P.eq True
             timeout 1000000 (wait server) `shouldSatisfy` P.returns (P.eq (Just ()))
 
+    xfail "implementation follows in the paired change" $ it "continues expected uploads before draining an unpulled body scope" $ do
+        getAcquisition >>= \acquisition -> newBufferPool acquisition (PoolSettings { bufferSize = positiveInt @8, ordinaryBufferCount = positiveInt @1, reserveBufferCount = positiveInt @1, setupBufferCount = positiveInt @1 }) >>= \resources -> do
+            let app _ exchange = do
+                    S.withBody exchange (\_ -> pure ())
+                    S.respond exchange status200 [("Content-Length", "2")] (\sink -> sink "ok")
+                receiveInterim client accumulated = do
+                    chunk <- NS.recv client 4096
+                    let bytes = accumulated <> chunk
+                    if B.isSuffixOf "\r\n\r\n" bytes || B.null chunk then pure bytes
+                        else receiveInterim client bytes
+            withServer resources app $ \client -> do
+                NS.sendAll client "POST / HTTP/1.1\r\nHost: local\r\nExpect: 100-continue\r\nContent-Length: 3\r\nConnection: close\r\n\r\n"
+                interim <- timeout 1000000 (receiveInterim client "")
+                interim `shouldSatisfy` P.eq (Just "HTTP/1.1 100 Continue\r\n\r\n")
+                NS.sendAll client "abc"
+                response <- receiveAll client
+                B.isSuffixOf "ok" response `shouldSatisfy` P.eq True
     it "receives post-header bytes directly into the admitted input buffer" $ do
         fp <- mallocForeignPtrBytes 8
         selected <- newEmptyMVar
