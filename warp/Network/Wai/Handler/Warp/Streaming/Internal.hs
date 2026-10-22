@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 module Network.Wai.Handler.Warp.Streaming.Internal
     ( withHTTP1Exchange, withBodyBuffer, respondResponse ) where
@@ -35,7 +36,7 @@ withHTTP1Exchange :: BufferAccess -> Request
     -> (Streaming.Request -> Exchange -> IO a) -> IO a
 withHTTP1Exchange buffers request attach send application = do
     unless (httpVersion request == H.http11) unavailable
-    when (any ((== H.hUpgrade) . fst) (requestHeaders request)) unavailable
+    when (any ((== "Upgrade") . fst) (requestHeaders request)) unavailable
     owner <- myThreadId
     state <- newIORef (Available, False)
     reader <- newOperationGate
@@ -78,6 +79,6 @@ withHTTP1Exchange buffers request attach send application = do
                 (\(mode, _) -> (mode, True))
             send (protect response)
         respond status headers body = respondExisting (ResponseBytes status headers body)
-        exchange = Exchange pooled supplied respond (\_ -> unavailable)
+        exchange = Exchange pooled supplied respond respondExisting
         metadata = Streaming.Request (setRequestBodyChunks unavailable request) buffers
     application metadata exchange `E.finally` expire Expired
