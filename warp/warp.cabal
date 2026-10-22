@@ -455,5 +455,5 @@ test-suite streams
     default-language: Haskell2010
     ghc-options: -Wall -threaded -F -pgmF skeletest-preprocessor
     build-tool-depends: skeletest:skeletest-preprocessor
-    build-depends: base, warp, wai, streaming-io, resource-admission, bytestring, http-types, stm, network,
+    build-depends: base, warp, wai, streaming-io, resource-admission, bytestring, http-types, stm, network, async,
                    skeletest >=0.4.2 && <0.5
