@@ -234,6 +234,7 @@ processRequest operation settings ii conn app th istatus src req mremainingRef i
             persistent <- readIORef keepAliveRef
             decision <- finish (not startedResponse || persistent)
             writeIORef finishedRef (Just decision)
+            T.pause th
             pure result
         runApplication respond = case operation of
             Nothing -> app req respond
@@ -277,7 +278,7 @@ processRequest operation settings ii conn app th istatus src req mremainingRef i
     if not keepAlive then pure CloseConnection else do
         finished <- readIORef finishedRef
         case finished of
-            Just decision -> pure decision
+            Just decision -> T.resume th >> pure decision
             Nothing -> case operation of
                 Nothing -> finish True
                 Just (_, _, input) -> do
