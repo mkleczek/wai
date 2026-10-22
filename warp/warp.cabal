@@ -60,6 +60,7 @@ library
         Network.Wai.Handler.Warp.Streaming.Internal
 
     other-modules:
+        Network.Wai.Handler.Warp.Streaming.Gate
         Network.Wai.Handler.Warp.Buffer
         Network.Wai.Handler.Warp.Conduit
         Network.Wai.Handler.Warp.Counter
