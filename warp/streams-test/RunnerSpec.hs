@@ -81,6 +81,17 @@ spec = describe "HTTP/1 operation-stream runner" $ do
                 response <- receiveAll client
                 B.isInfixOf "owned" response `shouldSatisfy` P.eq True
 
+    xfail "implementation follows in the paired change" $ it "pauses the transport timeout after withBody returns to application code" $ do
+        getAcquisition >>= \acquisition -> newBufferPool acquisition (PoolSettings { bufferSize = positiveInt @8, ordinaryBufferCount = positiveInt @1, reserveBufferCount = positiveInt @1, setupBufferCount = positiveInt @1 }) >>= \resources -> do
+            let app _ exchange = do
+                    S.withBody exchange $ \source -> pull source `shouldSatisfy` P.returns (P.eq "abc")
+                    threadDelay 1500000
+                    S.respond exchange status200 [("Content-Length", "2")] (\sink -> sink "ok")
+            withServerSettings (setTimeout 1 defaultSettings) resources app $ \client -> do
+                NS.sendAll client "POST / HTTP/1.1\r\nHost: local\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc"
+                response <- receiveAll client
+                B.isSuffixOf "ok" response `shouldSatisfy` P.eq True
+
 
 getAcquisition :: IO Context
 getAcquisition = newContext <$> getSystemTimerManager

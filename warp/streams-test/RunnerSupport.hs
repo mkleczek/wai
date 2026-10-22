@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-module RunnerSupport (withServer, receiveAll) where
+module RunnerSupport (withServer, withServerSettings, receiveAll) where
 
 import Control.Concurrent.Async (withAsync, cancel)
 import Control.Exception (bracket)
@@ -13,9 +13,12 @@ import qualified Network.Wai.Streaming as Streaming
 import System.Timeout (timeout)
 
 withServer :: BufferPool -> Streaming.Application -> (Socket -> IO a) -> IO a
-withServer resources app action = bracket listener close $ \sock -> do
+withServer = withServerSettings defaultSettings
+
+withServerSettings :: Settings -> BufferPool -> Streaming.Application -> (Socket -> IO a) -> IO a
+withServerSettings settings resources app action = bracket listener close $ \sock -> do
     address <- getSocketName sock
-    withAsync (runHTTP1Socket (setGracefulCloseTimeout1 0 defaultSettings) resources sock app) $ \server ->
+    withAsync (runHTTP1Socket (setGracefulCloseTimeout1 0 settings) resources sock app) $ \server ->
         bracket (socket AF_INET Stream defaultProtocol) close $ \client -> do
             connect client address
             result <- timeout 5000000 (action client)
