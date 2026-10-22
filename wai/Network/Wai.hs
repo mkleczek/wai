@@ -99,6 +99,7 @@ module Network.Wai (
     modifyResponse,
 ) where
 
+import Control.Exception (evaluate)
 import Control.Monad (unless)
 import qualified Data.ByteString as B
 import Data.ByteString.Builder (
@@ -273,7 +274,7 @@ responseToStream (ResponseFile s h fp Nothing) =
 responseToStream (ResponseBuilder s h b) =
     (s, h, \withBody -> withBody $ \sendChunk _flush -> sendChunk b)
 responseToStream (ResponseBytes s h body) =
-    (s, h, \use -> use $ \send _ -> body (send . byteString . B.copy))
+    (s, h, \use -> use $ \send _ -> body (\bytes -> evaluate (B.copy bytes) >>= send . byteString))
 responseToStream (ResponseRaw _ res) = responseToStream res
 
 -- | Apply the provided function to the response header list of the Response.
