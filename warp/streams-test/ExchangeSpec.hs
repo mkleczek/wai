@@ -135,6 +135,25 @@ spec = describe "HTTP/1 operation exchange" $ do
                     readIORef sawDetached `shouldSatisfy` P.returns (P.eq False)
                     S.respond exchange status200 [] (\_ -> pure ())
 
+    it "rejects concurrent sinks and joins blocked writes before responding returns" $ do
+        started <- newEmptyMVar
+        blocked <- newEmptyMVar
+        workerRef <- newIORef Nothing
+        getAcquisition >>= \acquisition -> newBufferPool acquisition (PoolSettings { bufferSize = positiveInt @8, ordinaryBufferCount = positiveInt @1, reserveBufferCount = positiveInt @1, setupBufferCount = positiveInt @1 }) >>= \resources ->
+            withHTTP1Exchange resources (defaultRequest { httpVersion = http11 })
+                (\_ use -> use (owned $ pure ""))
+                (\case
+                    ResponseBytes _ _ body -> body (\_ -> putMVar started () >> takeMVar blocked)
+                    _ -> failTest "expected direct-byte response") $ \_ exchange -> do
+                    rejects $ S.respond exchange status200 [] $ \sink -> do
+                        worker <- async (sink "first")
+                        writeIORef workerRef (Just worker)
+                        takeMVar started
+                        rejects (sink "second")
+                    Just worker <- readIORef workerRef
+                    joined <- timeout 1000000 (waitCatch worker)
+                    isJust joined `shouldSatisfy` P.eq True
+
 
 getAcquisition :: IO Context
 getAcquisition = newContext <$> getSystemTimerManager
