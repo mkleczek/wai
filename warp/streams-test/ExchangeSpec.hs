@@ -55,7 +55,7 @@ rejects action = do
 
 spec :: Spec
 spec = describe "HTTP/1 operation exchange" $ do
-    xfail "implementation follows in the paired change" $ it "uses explicitly supplied storage in the low-level input hook" $ do
+    it "uses explicitly supplied storage in the low-level input hook" $ do
         fp <- mallocForeignPtrBytes 8
         getAcquisition >>= \acquisition -> newBufferPool acquisition (PoolSettings { bufferSize = positiveInt @8, ordinaryBufferCount = positiveInt @1, reserveBufferCount = positiveInt @1, setupBufferCount = positiveInt @1 }) >>= \resources ->
             withHTTP1Exchange resources (defaultRequest { httpVersion = http11 })
@@ -70,7 +70,7 @@ spec = describe "HTTP/1 operation exchange" $ do
                         rejects (withBodyBuffer exchange (Buffer fp 8) (\_ -> pure ()))
                     rejects (withBodyBuffer exchange (Buffer fp 8) (\_ -> pure ()))
                     S.respond exchange status200 [] (\_ -> pure ())
-    xfail "implementation follows in the paired change" $ it "expires retained sources, sinks, and the exchange" $ do
+    it "expires retained sources, sinks, and the exchange" $ do
         fp <- mallocForeignPtrBytes 8
         sourceRef <- newIORef (owned $ pure "")
         sinkRef <- newIORef (\_ -> pure ())
