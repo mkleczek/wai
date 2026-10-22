@@ -18,8 +18,6 @@ module Network.Wai.Handler.Warp.Response (
 
 import qualified Control.Exception as E
 import qualified Data.ByteString.Char8 as S8
-import Numeric (showHex)
-import Network.Wai.Handler.Warp.Streaming.Gate
 import qualified Data.ByteString as S
 import Data.ByteString.Internal (toForeignPtr, unsafeCreate)
 import Data.ByteString.Builder (Builder, byteString)
@@ -51,6 +49,7 @@ import Network.Wai.Handler.Warp.IO (toBufIOWith, unsafeToBufIOWithOffset)
 import Network.Wai.Handler.Warp.Imports
 import Network.Wai.Handler.Warp.ResponseHeader
 import Network.Wai.Handler.Warp.Settings
+import Network.Wai.Handler.Warp.Streaming.Gate
 import Network.Wai.Handler.Warp.Types
 
 -- $setup
