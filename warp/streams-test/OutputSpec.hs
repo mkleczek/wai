@@ -43,7 +43,7 @@ send conn response = withII defaultSettings $ \info -> do
 
 spec :: Spec
 spec = describe "synchronous direct-byte HTTP response" $ do
-    xfail "byte response writer implementation pending" $ it "consumes borrowed slices before returning and bypasses Builder scratch" $ do
+    it "consumes borrowed slices before returning and bypasses Builder scratch" $ do
         fp <- mallocForeignPtrBytes 3
         output <- newIORef []
         direct <- newIORef False
@@ -63,7 +63,7 @@ spec = describe "synchronous direct-byte HTTP response" $ do
         result <- B.concat . reverse <$> readIORef output
         B.isSuffixOf "AAABBB" result `shouldSatisfy` P.eq True
         readIORef direct `shouldSatisfy` P.returns (P.eq True)
-    xfail "byte response writer implementation pending" $ it "frames each chunk and expires retained sinks" $ do
+    it "frames each chunk and expires retained sinks" $ do
         output <- newIORef []
         conn <- connection $ \chunk -> evaluate (B.copy chunk) >>= \owned -> modifyIORef' output (owned :)
         retained <- newIORef (\_ -> pure ())
@@ -76,7 +76,7 @@ spec = describe "synchronous direct-byte HTTP response" $ do
         isLeft outcome `shouldSatisfy` P.eq True
         result <- B.concat . reverse <$> readIORef output
         B.isSuffixOf "3\r\nabc\r\n0\r\n\r\n" result `shouldSatisfy` P.eq True
-    xfail "byte response writer implementation pending" $ it "rejects too few and too many content-length bytes" $ do
+    it "rejects too few and too many content-length bytes" $ do
         conn <- connection (\_ -> pure ())
         let check body = do
                 result <- try (send conn (ResponseBytes status200 [("Content-Length", "3")] body))
