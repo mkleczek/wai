@@ -164,6 +164,35 @@ spec = describe "HTTP/1 operation exchange" $ do
                     rejects (S.respond exchange status200 [] (\_ -> pure ()))
                     readIORef sent `shouldSatisfy` P.returns (P.eq True)
 
+    it "finishes child cleanup before detach when the owner is interrupted again while joining" $ do
+        fp <- mallocForeignPtrBytes 8
+        started <- newEmptyMVar
+        blocked <- newEmptyMVar
+        cleanupStarted <- newEmptyMVar
+        allowCleanup <- newEmptyMVar
+        cancellationStarted <- newEmptyMVar
+        detached <- newIORef False
+        owner <- async $ getAcquisition >>= \acquisition -> newBufferPool acquisition (PoolSettings { bufferSize = positiveInt @8, ordinaryBufferCount = positiveInt @1, reserveBufferCount = positiveInt @1, setupBufferCount = positiveInt @1 }) >>= \resources ->
+            withHTTP1Exchange resources (defaultRequest { httpVersion = http11 })
+                (\_ use -> use
+                    (owned $ (putMVar started () >> takeMVar blocked >> pure "")
+                        `finally` (putMVar cleanupStarted () >> takeMVar allowCleanup))
+                    `finally` writeIORef detached True)
+                (\_ -> pure ()) $ \_ exchange ->
+                    withBodyBuffer exchange (Buffer fp 8) $ \source -> do
+                        _ <- async (pull source)
+                        takeMVar started
+        takeMVar cleanupStarted
+        interrupter <- async (putMVar cancellationStarted () >> cancel owner)
+        takeMVar cancellationStarted
+        (do
+            threadDelay 20000
+            readIORef detached `shouldSatisfy` P.returns (P.eq False))
+            `finally` void (tryPutMVar allowCleanup ())
+        joined <- timeout 1000000 (waitCatch owner)
+        isJust joined `shouldSatisfy` P.eq True
+        _ <- waitCatch interrupter
+        readIORef detached `shouldSatisfy` P.returns (P.eq True)
 
 getAcquisition :: IO Context
 getAcquisition = newContext <$> getSystemTimerManager
