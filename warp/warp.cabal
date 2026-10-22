@@ -57,6 +57,7 @@ library
     exposed-modules:
         Network.Wai.Handler.Warp
         Network.Wai.Handler.Warp.Internal
+        Network.Wai.Handler.Warp.Streaming.Internal
 
     other-modules:
         Network.Wai.Handler.Warp.Buffer
@@ -114,6 +115,7 @@ library
         simple-sendfile >=0.2.7 && <0.3,
         stm >=2.3,
         streaming-commons >=0.1.10,
+        streaming-io >=0.1 && <0.2,
         text,
         time-manager >=0.2 && <0.4,
         vault >=0.3,

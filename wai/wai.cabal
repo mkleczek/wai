@@ -27,9 +27,12 @@ Library
                    , network                   >= 2.2.1.5
                    , http-types                >= 0.7
                    , text                      >= 0.7
+                   , streaming-io              >= 0.1 && < 0.2
                    , vault                     >= 0.3      && < 0.4
   Exposed-modules:   Network.Wai
                      Network.Wai.Internal
+                     Network.Wai.Streaming
+                     Network.Wai.Streaming.Internal
   ghc-options:       -Wall
 
 test-suite test
