@@ -154,6 +154,16 @@ spec = describe "HTTP/1 operation exchange" $ do
                     joined <- timeout 1000000 (waitCatch worker)
                     isJust joined `shouldSatisfy` P.eq True
 
+    xfail "ordinary response routing follows in the paired change" $ it "routes ordinary responses through the same one-shot gate and rejects raw upgrades" $ do
+        sent <- newIORef False
+        getAcquisition >>= \acquisition -> newBufferPool acquisition (PoolSettings { bufferSize = positiveInt @8, ordinaryBufferCount = positiveInt @1, reserveBufferCount = positiveInt @1, setupBufferCount = positiveInt @1 }) >>= \resources ->
+            withHTTP1Exchange resources (defaultRequest { httpVersion = http11 })
+                (\_ use -> use (owned $ pure "")) (\_ -> writeIORef sent True) $ \_ exchange -> do
+                    rejects (respondResponse exchange (responseRaw (\_ _ -> pure ()) (responseLBS status200 [] "")))
+                    respondResponse exchange (responseLBS status200 [] "owned")
+                    rejects (S.respond exchange status200 [] (\_ -> pure ()))
+                    readIORef sent `shouldSatisfy` P.returns (P.eq True)
+
 
 getAcquisition :: IO Context
 getAcquisition = newContext <$> getSystemTimerManager
