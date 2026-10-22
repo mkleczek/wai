@@ -229,6 +229,9 @@ test-suite spec
         Network.Wai.Handler.Warp.RequestHeader
         Network.Wai.Handler.Warp.Response
         Network.Wai.Handler.Warp.Streaming.Gate
+        Network.Wai.Handler.Warp.Streaming.Internal
+        Network.Wai.Handler.Warp.Streaming.Input
+        Network.Wai.Handler.Warp.Streaming.InputContext
         Network.Wai.Handler.Warp.ResponseHeader
         Network.Wai.Handler.Warp.Run
         Network.Wai.Handler.Warp.SendFile
@@ -267,6 +270,7 @@ test-suite spec
         simple-sendfile >=0.2.4 && <0.3,
         stm >=2.3,
         streaming-commons >=0.1.10,
+        streaming-io >=0.1 && <0.2,
         text,
         time-manager,
         vault,
@@ -459,3 +463,6 @@ test-suite streams
     build-tool-depends: skeletest:skeletest-preprocessor
     build-depends: base, warp, wai, streaming-io, resource-admission, bytestring, http-types, stm, network, async,
                    skeletest >=0.4.2 && <0.5
+
+    if flag(x509)
+        build-depends: crypton-x509

@@ -110,7 +110,8 @@ data Connection = Connection
     { connSendMany :: [ByteString] -> IO ()
     -- ^ This is not used at this moment.
     , connSendAll :: ByteString -> IO ()
-    -- ^ The sending function.
+    -- ^ Consume the full chunk before returning, without retaining borrowed
+    -- plaintext. Operation-stream scopes rely on cancellation ending its use.
     , connSendFile :: SendFile
     -- ^ The sending function for files in HTTP/1.1.
     , connClose :: IO ()
@@ -123,6 +124,7 @@ data Connection = Connection
     -- ^ Optional blocking receive into borrowed storage. The callback may drive
     -- cross-direction transport progress (for example TLS writes while reading).
     -- It must not retain the pointer and must return a count in [0, capacity].
+    -- It must be cancellable so scope teardown can join it before reuse.
     -- Unsupported transports use Nothing; ordinary receiving is unchanged.
     , connRecvBuf :: RecvBuf
     -- ^ Obsoleted.
