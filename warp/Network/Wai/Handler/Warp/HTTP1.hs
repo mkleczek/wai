@@ -1,3 +1,5 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PackageImports #-}
@@ -5,10 +7,17 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Network.Wai.Handler.Warp.HTTP1 (
-    http1,
+    http1, http1Streaming,
 ) where
 
 import qualified Control.Concurrent as Conc (yield)
+import qualified Control.Exception as E
+import Network.Streaming.BufferPool (BufferPool, BufferAccess, withRequestBuffers)
+import qualified Network.Streaming as Stream
+import qualified Network.Wai.Streaming as Streaming
+import Network.Wai.Handler.Warp.Streaming.Internal (withHTTP1Exchange)
+import Network.Wai.Handler.Warp.Streaming.Input (Receive)
+import Network.Wai.Handler.Warp.Streaming.InputContext
 import Control.Exception (SomeException, catch, fromException, throwIO, try)
 import qualified Data.ByteString as BS
 import Data.Char (chr)
@@ -38,14 +47,39 @@ http1
     -> T.Handle
     -> ByteString
     -> IO ()
-http1 settings ii conn transport app origAddr th bs0 = do
+http1 = http1With Nothing
+
+type StreamingMode = (BufferPool, Streaming.Application, IO ByteString, Receive)
+
+http1Streaming :: BufferPool -> Settings -> InternalInfo -> Connection -> Transport
+    -> Streaming.Application -> SockAddr -> T.Handle -> IO ()
+http1Streaming resources settings ii conn transport app addr th = do
+    receive <- maybe (ioError (userError "Warp transport cannot receive into supplied storage"))
+        pure (connRecvInto conn)
+    withMetadataReceive receive $ \metadata ->
+        http1With (Just (resources, app, metadata, receive)) settings ii conn transport
+            (\_ _ -> error "ordinary application unavailable in operation-stream runner") addr th BS.empty
+
+http1With :: Maybe StreamingMode -> Settings -> InternalInfo -> Connection -> Transport
+    -> Application -> SockAddr -> T.Handle -> ByteString -> IO ()
+http1With streaming settings ii conn transport app origAddr th bs0 = do
     istatus <- newIORef True
-    src <- mkSource (wrappedRecv conn istatus (settingsSlowlorisSize settings))
+    let wrapMetadata receive = wrappedRecv receive istatus (settingsSlowlorisSize settings)
+        wrapBody receive ptr capacity = do
+            count <- receive ptr capacity
+            when (count >= settingsSlowlorisSize settings) $ T.tickle th
+            pure count
+        mode = fmap (\(resources, handler, metadata, receive) ->
+            (resources, handler, wrapMetadata metadata, wrapBody receive)) streaming
+        selectedReceive = case mode of
+            Nothing -> wrapMetadata (connRecv conn)
+            Just (_, _, metadata, _) -> metadata
+    src <- mkSource selectedReceive
     leftoverSource src bs0
     addr <- getProxyProtocolAddr src
-    http1server settings ii conn transport app addr th istatus src
+    http1server mode settings ii conn transport app addr th istatus src
   where
-    wrappedRecv Connection{connRecv = recv} istatus slowlorisSize = do
+    wrappedRecv recv istatus slowlorisSize = do
         bs <- recv
         unless (BS.null bs) $ do
             writeIORef istatus True
@@ -102,19 +136,10 @@ http1 settings ii conn transport app origAddr th bs0 = do
 
     decodeAscii = map (chr . fromEnum) . BS.unpack
 
-http1server
-    :: Settings
-    -> InternalInfo
-    -> Connection
-    -> Transport
-    -> Application
-    -> SockAddr
-    -> T.Handle
-    -> IORef Bool
-    -> Source
-    -> IO ()
-http1server settings ii conn transport app addr th istatus src =
-    loop FirstRequest `catch` handler
+http1server :: Maybe StreamingMode -> Settings -> InternalInfo -> Connection
+    -> Transport -> Application -> SockAddr -> T.Handle -> IORef Bool -> Source -> IO ()
+http1server streaming settings ii conn transport app addr th istatus initialSource =
+    loop FirstRequest initialSource `catch` handler
   where
     handler e
         -- See comment below referencing
@@ -135,11 +160,40 @@ http1server settings ii conn transport app addr th istatus src =
                     e
             throwIO e
 
-    loop firstRequest = do
+    loop firstRequest previous = do
+        (keepAlive, next) <- case streaming of
+            Nothing -> do
+                decision <- serve firstRequest previous Nothing
+                pure (decision, previous)
+            Just (resources, appHandler, metadata, receive) -> do
+                leftover <- readLeftoverSource previous
+                prefix <- if BS.null leftover then metadata else pure leftover
+                when (BS.null prefix) $ case firstRequest of
+                    FirstRequest -> throwIO ConnectionClosedByPeer
+                    SubsequentRequest -> throwIO NoKeepAliveRequest
+                writeIORef istatus True
+                T.pause th
+                withRequestBuffers resources $ \access -> do
+                    T.resume th
+                    input <- newInputContext access receive prefix
+                    let src = contextSource input
+                    flip E.finally (closeInputContext input) $ do
+                        decision <- serve firstRequest src (Just (access, appHandler, input))
+                        prefix' <- inputLeftover input
+                        next <- mkSource metadata
+                        leftoverSource next prefix'
+                        pure (decision, next)
+        case keepAlive of
+            ReuseConnection -> loop SubsequentRequest next
+            CloseConnection -> return ()
+
+    serve firstRequest src operation = do
         (req, mremainingRef, idxhdr, nextBodyFlush) <-
             recvRequest firstRequest settings conn ii th addr src transport
-        keepAlive <-
-            processRequest
+        case operation of
+            Just (_, _, input) -> headersComplete input
+            Nothing -> pure ()
+        processRequest operation
                 settings
                 ii
                 conn
@@ -156,43 +210,40 @@ http1server settings ii conn transport app addr th istatus src =
                     -- Don't throw the error again to prevent calling settingsOnException twice.
                     return CloseConnection
 
-        -- When doing a keep-alive connection, the other side may just
-        -- close the connection. We don't want to treat that as an
-        -- exceptional situation, so we pass in SubsequentRequest to http1 (which
-        -- in turn passes in SubsequentRequest to recvRequest), indicating that
-        -- this is not the first request. If, when trying to read the
-        -- request headers, no data is available, recvRequest will
-        -- throw a NoKeepAliveRequest exception, which we catch here
-        -- and ignore. See: https://github.com/yesodweb/wai/issues/618
-
-        case keepAlive of
-            ReuseConnection -> loop SubsequentRequest
-            CloseConnection -> return ()
-
 data ReuseConnection = ReuseConnection | CloseConnection
 
-processRequest
-    :: Settings
-    -> InternalInfo
-    -> Connection
-    -> Application
-    -> T.Handle
-    -> IORef Bool
-    -> Source
-    -> Request
-    -> Maybe (IORef Int)
-    -> IndexedRequestHeader
-    -> IO ByteString
+processRequest :: Maybe (BufferAccess, Streaming.Application, InputContext)
+    -> Settings -> InternalInfo -> Connection -> Application -> T.Handle -> IORef Bool
+    -> Source -> Request -> Maybe (IORef Int) -> IndexedRequestHeader -> IO ByteString
     -> IO ReuseConnection
-processRequest settings ii conn app th istatus src req mremainingRef idxhdr nextBodyFlush = do
+processRequest operation settings ii conn app th istatus src req mremainingRef idxhdr nextBodyFlush = do
     -- Let the application run for as long as it wants
     T.pause th
 
     -- In the event that some scarce resource was acquired during
     -- creating the request, we need to make sure that we don't get
     -- an async exception before calling the ResponseSource.
-    keepAliveRef <- newIORef $ error "keepAliveRef not filled"
-    r <- try $ app req $ \res -> do
+    keepAliveRef <- newIORef False
+    finishedRef <- newIORef Nothing
+    let finish = finishRequestBody settings th mremainingRef nextBodyFlush
+        attach input buffer use = withInputBuffer input buffer $ do
+            result <- use (Stream.Source $ \consume -> E.mask $ \restore -> do
+                chunk <- restore (getRequestBodyChunk req)
+                restore (consume chunk))
+            startedResponse <- not <$> readIORef istatus
+            persistent <- readIORef keepAliveRef
+            decision <- finish (not startedResponse || persistent)
+            writeIORef finishedRef (Just decision)
+            pure result
+        runApplication respond = case operation of
+            Nothing -> app req respond
+            Just (access, handler, input) -> do
+                withHTTP1Exchange access req
+                    (\buffer use -> attach input buffer use
+                        `E.onException` writeIORef finishedRef (Just CloseConnection))
+                    (void . respond) handler
+                pure ResponseReceived
+    r <- try $ runApplication $ \res -> do
         T.resume th
         -- FIXME consider forcing evaluation of the res here to
         -- send more meaningful error messages to the user.
@@ -209,7 +260,7 @@ processRequest settings ii conn app th istatus src req mremainingRef idxhdr next
             | otherwise -> do
                 keepAlive <- sendErrorResponse settings ii conn th istatus req e
                 settingsOnException settings (Just req) e
-                writeIORef keepAliveRef keepAlive
+                writeIORef keepAliveRef (case operation of Nothing -> keepAlive; Just _ -> False)
 
     keepAlive <- readIORef keepAliveRef
 
@@ -223,6 +274,23 @@ processRequest settings ii conn app th istatus src req mremainingRef idxhdr next
     -- the number of cores is small.
     Conc.yield
 
+    if not keepAlive then pure CloseConnection else do
+        finished <- readIORef finishedRef
+        case finished of
+            Just decision -> pure decision
+            Nothing -> case operation of
+                Nothing -> finish True
+                Just (_, _, input) -> do
+                    remaining <- traverse readIORef mremainingRef
+                    case remaining of
+                        Just 0 -> finish True
+                        Just count | Just limit <- settingsMaximumBodyFlush settings
+                            , count > limit -> pure CloseConnection
+                        _ -> withInputBuffer input Nothing (finish True)
+
+finishRequestBody :: Settings -> T.Handle -> Maybe (IORef Int) -> IO ByteString
+    -> Bool -> IO ReuseConnection
+finishRequestBody settings th mremainingRef nextBodyFlush keepAlive =
     if keepAlive
         then -- If there is an unknown or large amount of data to still be read
         -- from the request body, simple drop this connection instead of
