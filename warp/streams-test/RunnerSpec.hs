@@ -180,7 +180,7 @@ spec = describe "HTTP/1 operation-stream runner" $ do
                     timeout 300000 (withRequestBuffers resources (\_ -> pure ())) `shouldSatisfy` P.returns (P.eq (Just ()))
                     receiveAll client `shouldSatisfy` P.returns (P.eq "")
 
-    xfail "implementation follows in the paired change" $ it "parses PROXY control metadata before admitting request payload storage" $
+    it "parses PROXY control metadata before admitting request payload storage" $
         getAcquisition >>= \acquisition -> newBufferPool acquisition (PoolSettings { bufferSize = positiveInt @8, ordinaryBufferCount = positiveInt @1, reserveBufferCount = positiveInt @1, setupBufferCount = positiveInt @1 }) >>= \resources -> do
             let app request exchange = do
                     remoteHost (S.requestMetadata request) `shouldSatisfy` P.eq (SockAddrInet 1234 (tupleToHostAddress (1,2,3,4)))

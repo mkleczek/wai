@@ -1,6 +1,8 @@
 module Network.Wai.Handler.Warp.Buffer (
     createWriteBuffer,
     ensureWriteBuffer,
+    releaseWriteBuffer,
+    emptyWriteBuffer,
     allocateBuffer,
     freeBuffer,
     toBuilderBuffer,
@@ -12,7 +14,7 @@ import Data.IORef (IORef, readIORef, writeIORef)
 import qualified Data.Streaming.ByteString.Builder.Buffer as B (Buffer (..))
 import Foreign.ForeignPtr
 import Foreign.Marshal.Alloc (free, mallocBytes)
-import Foreign.Ptr (plusPtr)
+import Foreign.Ptr (plusPtr, nullPtr)
 import Network.Socket.BufferPool
 
 import Network.Wai.Handler.Warp.Imports
@@ -33,6 +35,16 @@ createWriteBuffer size = do
             }
 
 ----------------------------------------------------------------
+
+emptyWriteBuffer :: WriteBuffer
+emptyWriteBuffer = WriteBuffer nullPtr 0 (pure ())
+
+-- | Forget owned compatibility storage before returning to idle operation.
+releaseWriteBuffer :: IORef WriteBuffer -> IO ()
+releaseWriteBuffer ref = mask_ $ do
+    current <- readIORef ref
+    writeIORef ref emptyWriteBuffer
+    bufFree current
 
 -- | Compatibility output is allocated only when a Builder/file path needs it.
 -- The caller owns the response writer exclusively.

@@ -33,7 +33,7 @@ import System.Timeout (timeout)
 
 spec :: Spec
 spec = describe "per-request body capabilities" $ do
-    xfail "admission timeout handling follows in the paired change" $ it "returns 503 and closes when the primary pool stays exhausted, without using the reserve" $
+    it "returns 503 and closes when the primary pool stays exhausted, without using the reserve" $
         getAcquisition >>= \acquisition -> newBufferPool acquisition (PoolSettings { bufferSize = positiveInt @8, ordinaryBufferCount = positiveInt @1, reserveBufferCount = positiveInt @1, setupBufferCount = positiveInt @1 }) >>= \resources -> do
             held <- newEmptyMVar
             releaseHeld <- newEmptyMVar
@@ -86,7 +86,7 @@ spec = describe "per-request body capabilities" $ do
                     B.isPrefixOf "HTTP/1.1 200" response `shouldSatisfy` P.eq True
                     B.isSuffixOf "ok" response `shouldSatisfy` P.eq True
 
-    xfail "admission timeout handling follows in the paired change" $ it "delivers 503 when a rejected upload has unread body bytes" $
+    it "delivers 503 when a rejected upload has unread body bytes" $
         getAcquisition >>= \acquisition -> newBufferPool acquisition (PoolSettings { bufferSize = positiveInt @8, ordinaryBufferCount = positiveInt @1, reserveBufferCount = positiveInt @1, setupBufferCount = positiveInt @1 }) >>= \resources -> do
             held <- newEmptyMVar
             releaseHeld <- newEmptyMVar
@@ -128,7 +128,7 @@ spec = describe "per-request body capabilities" $ do
                 wait holder
                 timeout 300000 (withRequestBuffers resources (\_ -> pure ())) `shouldSatisfy` P.returns (P.eq (Just ()))
 
-    xfail "admission timeout handling follows in the paired change" $ it "bounds a blocked 503 transport write" $
+    it "bounds a blocked 503 transport write" $
         getAcquisition >>= \acquisition -> newBufferPool acquisition (PoolSettings { bufferSize = positiveInt @8, ordinaryBufferCount = positiveInt @1, reserveBufferCount = positiveInt @1, setupBufferCount = positiveInt @1 }) >>= \resources -> do
             held <- newEmptyMVar
             releaseHeld <- newEmptyMVar
@@ -208,7 +208,7 @@ spec = describe "per-request body capabilities" $ do
                 response <- receiveAll client
                 B.isSuffixOf "abc" response `shouldSatisfy` P.eq True
 
-    xfail "implementation follows in the paired change" $ it "returns a fully consumed input loan before the next body pull" $
+    it "returns a fully consumed input loan before the next body pull" $
         getAcquisition >>= \acquisition -> newBufferPool acquisition (PoolSettings { bufferSize = positiveInt @8, ordinaryBufferCount = positiveInt @1, reserveBufferCount = positiveInt @1, setupBufferCount = positiveInt @1 }) >>= \resources -> do
             ready <- newEmptyMVar
             let app request exchange = do
@@ -228,7 +228,7 @@ spec = describe "per-request body capabilities" $ do
                 response <- receiveAll client
                 B.isSuffixOf "ok" response `shouldSatisfy` P.eq True
 
-    xfail "implementation follows in the paired change" $ it "owns header metadata when every body region is overwritten after a read-ahead callback" $
+    it "owns header metadata when every body region is overwritten after a read-ahead callback" $
         getAcquisition >>= \acquisition -> newBufferPool acquisition (PoolSettings { bufferSize = positiveInt @128, ordinaryBufferCount = positiveInt @1, reserveBufferCount = positiveInt @1, setupBufferCount = positiveInt @1 }) >>= \resources -> do
             let app request exchange = do
                     S.withBody exchange $ \source -> do

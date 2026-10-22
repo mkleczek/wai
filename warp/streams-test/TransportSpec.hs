@@ -114,7 +114,7 @@ spec = describe "blocking transport callback ownership" $ do
         result <- B.concat . reverse <$> readIORef output
         B.isInfixOf " 500 " result `shouldSatisfy` P.eq True
 
-    xfail "implementation follows in the paired change" $ it "returns compatibility output storage before acquisition for the next request" $ do
+    it "returns compatibility output storage before acquisition for the next request" $ do
         pending <- newIORef "GET / HTTP/1.1\r\nHost: local\r\n\r\n"
         base <- connection (\_ -> pure ())
         let receive ptr capacity = do

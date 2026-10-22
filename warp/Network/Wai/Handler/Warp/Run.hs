@@ -11,6 +11,7 @@ module Network.Wai.Handler.Warp.Run where
 
 import Control.Arrow (first)
 import Control.Concurrent.STM (
+    STM,
     TVar,
     atomically,
     check,
@@ -24,7 +25,7 @@ import qualified Data.ByteString as S
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Streaming.Network (bindPortTCP)
 import Foreign.C.Error (Errno (..), eMFILE)
-import Foreign.Ptr (nullPtr)
+import Foreign.Ptr (Ptr)
 import GHC.Conc.Sync (labelThread, myThreadId)
 import GHC.IO.Exception (IOErrorType (..), IOException (..))
 import Network.Socket (
@@ -38,7 +39,7 @@ import Network.Socket (
     getSocketName,
     isClosedSocketError,
     isTransientAcceptError,
-    recvBuf,
+    recvBufWith,
     withReadable,
     setSocketOption,
     withSocketsDo,
@@ -57,7 +58,7 @@ import qualified System.ThreadManager as T
 import qualified System.TimeManager as T
 import System.Timeout (timeout)
 
-import Network.Wai.Handler.Warp.Buffer (createWriteBuffer, ensureWriteBuffer)
+import Network.Wai.Handler.Warp.Buffer (createWriteBuffer, ensureWriteBuffer, emptyWriteBuffer)
 import Network.Wai.Handler.Warp.Counter
 import qualified Network.Wai.Handler.Warp.Date as D
 import qualified Network.Wai.Handler.Warp.FdCache as F
@@ -86,7 +87,7 @@ socketConnectionWith legacyBuffers set s = do
         pure (receive' bufferPool ss)
       else pure (\_ -> ioError (userError "legacy receive is unavailable in the HTTP/1 operation runner"))
     writeBuffer <- if legacyBuffers then createWriteBuffer 16384
-        else pure (WriteBuffer nullPtr 0 (pure ()))
+        else pure emptyWriteBuffer
     writeBufferRef <- newIORef writeBuffer
     isH2 <- newIORef False -- HTTP/1.x
     mysa <- getSocketName s
@@ -110,7 +111,7 @@ socketConnectionWith legacyBuffers set s = do
             , connClose = close s
 #endif
             , connRecv = recvAction appsInProgress
-            , connRecvInto = Just (recvBuf s)
+            , connRecvInto = Just (makeGracefulRecvInto s ss appsInProgress)
             , connRecvBuf = \_ _ -> return True -- obsoleted
             , connWriteBuffer = writeBufferRef
             , connHTTP2 = isH2
@@ -156,14 +157,31 @@ socketConnectionWith legacyBuffers set s = do
 -- read and the shutdown are waited for at once, inside 'receiveWith'.
 makeGracefulRecv :: Socket -> BufferPool -> ServerState -> TVar Int -> Recv
 makeGracefulRecv sock pool ss appsInProgress = do
-    r <- receiveWith sock pool checkShutdown
+    r <- receiveWith sock pool (shutdownReached ss appsInProgress)
     case r of
         Left () -> return ""
         Right bs -> return bs
+
+-- | Supplied storage uses the same shutdown wakeup as owned receives. Active
+-- applications may keep reading their uploads until their synchronous response
+-- finishes; an idle metadata read must not hold graceful shutdown open.
+makeGracefulRecvInto :: Socket -> ServerState -> TVar Int -> Ptr Word8 -> Int -> IO Int
+makeGracefulRecvInto sock ss appsInProgress ptr capacity = E.handle handler $ do
+    r <- recvBufWith sock ptr capacity (shutdownReached ss appsInProgress)
+    case r of
+        Left () -> pure 0
+        Right n -> pure n
   where
-    checkShutdown = do
-        check =<< currentShuttingDownStateSTM ss
-        check . (<= 0) =<< readTVar appsInProgress
+    handler :: E.IOException -> IO Int
+    handler e
+        | ioeGetErrorType e == InvalidArgument = pure 0
+        | otherwise = E.throwIO e
+
+-- | The server is shutting down and no 'Application' is using the 'Socket'.
+shutdownReached :: ServerState -> TVar Int -> STM ()
+shutdownReached ss appsInProgress = do
+    check =<< currentShuttingDownStateSTM ss
+    check . (<= 0) =<< readTVar appsInProgress
 
 -- | Run an 'Application' on the given port.
 -- This calls 'runSettings' with 'defaultSettings'.
