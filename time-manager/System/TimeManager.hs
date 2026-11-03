@@ -48,8 +48,10 @@ module System.TimeManager (
 
 import Control.Concurrent (forkIO, mkWeakThreadId, myThreadId)
 import qualified Control.Exception as E
-import Control.Monad (void)
+import Control.Monad (void, when)
 import qualified Data.IORef as I
+import Data.Word (Word64)
+import GHC.Clock (getMonotonicTimeNSec)
 import System.Mem.Weak (deRefWeak)
 import System.TimeManager.Internal
 
@@ -126,10 +128,8 @@ register :: Manager -> TimeoutAction -> IO Handle
 register mgr@(Manager timeout) onTimeout
     | isNoManager mgr = pure emptyHandle
     | otherwise = do
-        sysmgr <- getTimerManager
-        key <- EV.registerTimeout sysmgr timeout onTimeout
-        keyref <- I.newIORef key
-        state <- I.newIORef Active
+        keyref <- I.newIORef $ error "time-manager: Handle.handleKeyRef not set"
+        state <- I.newIORef . HandleState True =<< deadlineAfter timeout
         let h =
                 Handle
                     { handleTimeout = timeout
@@ -137,48 +137,71 @@ register mgr@(Manager timeout) onTimeout
                     , handleKeyRef = keyref
                     , handleState = state
                     }
+        arm timeout h
         pure h
+
+-- | Registering the GHC timer that checks the deadline of a handle.
+arm :: Int -> Handle -> IO ()
+arm micros h@Handle{..} = do
+    mgr <- getTimerManager
+    key <- EV.registerTimeout mgr micros (expire h)
+    I.atomicWriteIORef handleKeyRef key
+
+data Verdict = Dormant | Expired | Later Word64
+
+-- | A fired timer does not mean a timeout: the deadline may have been pushed
+-- back by 'tickle' or 'resume', or removed by 'pause'.
+expire :: Handle -> IO ()
+expire h@Handle{..} = do
+    now <- getMonotonicTimeNSec
+    verdict <- I.atomicModifyIORef' handleState $ \st@HandleState{..} ->
+        if handleDeadline == 0
+            then (HandleState False 0, Dormant)
+            else
+                if handleDeadline > now
+                    then (st, Later (handleDeadline - now))
+                    else (HandleState False 0, Expired)
+    case verdict of
+        Dormant -> pure ()
+        Expired -> handleAction
+        Later nanos -> arm (fromIntegral (max 1 ((nanos + 999) `div` 1000))) h
+
+deadlineAfter :: Int -> IO Word64
+deadlineAfter micros = (+ fromIntegral micros * 1000) <$> getMonotonicTimeNSec
 
 -- | Unregistering the timeout.
 cancel :: Handle -> IO ()
 cancel h@Handle{..} = withNonEmptyHandle h $ do
-    mgr <- getTimerManager
-    key <- I.readIORef handleKeyRef
-    EV.unregisterTimeout mgr key
-    I.atomicWriteIORef handleState Stopped
+    armed <- I.atomicModifyIORef' handleState $ \HandleState{..} -> (HandleState False 0, handleArmed)
+    when armed $ do
+        mgr <- getTimerManager
+        key <- I.readIORef handleKeyRef
+        EV.unregisterTimeout mgr key
 
 -- | Extending the timeout.
 --
 -- Careful: this does NOT reactivate an already paused 'Handle'!
 tickle :: Handle -> IO ()
 tickle h@Handle{..} = withNonEmptyHandle h $ do
-    mgr <- getTimerManager
-    key <- I.readIORef handleKeyRef
-#if defined(mingw32_HOST_OS)
-    EV.updateTimeout mgr key $ fromIntegral (handleTimeout `div` 1000000)
-#else
-    EV.updateTimeout mgr key handleTimeout
-#endif
+    deadline <- deadlineAfter handleTimeout
+    I.atomicModifyIORef' handleState $ \st ->
+        (if handleDeadline st == 0 then st else st{handleDeadline = deadline}, ())
 
--- | This is identical to 'cancel'.
---   To resume timeout with the same 'Handle', 'resume' MUST be called.
---   Don't call 'tickle' for resumption.
+-- | Stopping the timeout until 'resume' is called. The registered timer
+-- stays and is ignored when it fires.
 pause :: Handle -> IO ()
-pause = cancel
+pause h@Handle{..} = withNonEmptyHandle h $
+    I.atomicModifyIORef' handleState $ \st -> (st{handleDeadline = 0}, ())
 
 -- | Resuming the timeout.
 --
 -- Works like 'tickle' if the 'Handle' wasn't 'pause'd or 'cancel'ed.
 resume :: Handle -> IO ()
 resume h@Handle{..} = withNonEmptyHandle h $ do
-    state <- I.readIORef handleState
-    case state of
-        Active -> tickle h
-        Stopped -> do
-            mgr <- getTimerManager
-            key <- EV.registerTimeout mgr handleTimeout handleAction
-            I.atomicWriteIORef handleKeyRef key
-            I.atomicWriteIORef handleState Active
+    deadline <- deadlineAfter handleTimeout
+    needTimer <- I.atomicModifyIORef' handleState $ \HandleState{..} ->
+        (HandleState True deadline, not handleArmed)
+    when needTimer $ arm handleTimeout h
 
 ----------------------------------------------------------------
 

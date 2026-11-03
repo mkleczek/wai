@@ -6,6 +6,7 @@
 module System.TimeManager.Internal where
 
 import Data.IORef (IORef)
+import Data.Word (Word64)
 
 #if defined(mingw32_HOST_OS)
 import qualified GHC.Event.Windows as EV
@@ -37,7 +38,14 @@ data Handle = Handle
 
 -- | Tracking the state of a handle, to be able to have 'resume'
 -- act like a 'register' or 'tickle'.
-data HandleState = Active | Stopped
+--
+-- A GHC timer is registered while the handle is armed. It only checks the
+-- deadline (in monotonic nanoseconds, zero while paused) when it fires, so that
+-- 'tickle', 'pause' and 'resume' leave GHC's single shared timer queue alone.
+data HandleState = HandleState
+    { handleArmed :: Bool
+    , handleDeadline :: Word64
+    }
 
 isEmptyHandle :: Handle -> Bool
 isEmptyHandle Handle{..} = handleTimeout == 0

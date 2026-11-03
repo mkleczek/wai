@@ -1,5 +1,13 @@
 # ChangeLog for time-manager
 
+## Unreleased
+
+* `tickle`, `pause` and `resume` no longer edit GHC's System TimerManager
+  queue. Every connection used to contend on its single shared `IORef`
+  several times per request, which convoys threads on black holes.
+  The registered timer now checks a per-handle deadline when it fires.
+  `pause` leaves the timer registered, and `cancel` unregisters it.
+
 ## 0.3.2
 
 * Add `stopAfterWithResult`. [#1069](https://github.com/yesodweb/wai/pull/1069)
