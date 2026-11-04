@@ -193,6 +193,7 @@ test-suite spec
         ExceptionSpec
         FdCacheSpec
         FileSpec
+        GracefulRecvSpec
         GracefulShutdownSpec
         HTTP
         HTTP2Spec
