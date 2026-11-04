@@ -68,8 +68,7 @@ withShutdownReceive action = do
 spec :: Spec
 spec = describe "makeGracefulRecvInto" $ do
     describe "when the graceful shutdown is already reached" $ do
-        it "returns the bytes already waiting on the socket" $ do
-            pendingWith "it waits on the IO manager before trying a no-wait read"
+        it "returns the bytes already waiting on the socket" $
             withShutdownReceive $ \local peer receive -> do
                 sendAll peer "hello"
                 -- The bytes are in the socket before the receive starts.

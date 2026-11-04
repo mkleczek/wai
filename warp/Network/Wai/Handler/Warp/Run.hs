@@ -39,6 +39,7 @@ import Network.Socket (
     getSocketName,
     isClosedSocketError,
     isTransientAcceptError,
+    recvBufNoWait,
     recvBufWith,
     withReadable,
     setSocketOption,
@@ -167,10 +168,18 @@ makeGracefulRecv sock pool ss appsInProgress = do
 -- finishes; an idle metadata read must not hold graceful shutdown open.
 makeGracefulRecvInto :: Socket -> ServerState -> TVar Int -> Ptr Word8 -> Int -> IO Int
 makeGracefulRecvInto sock ss appsInProgress ptr capacity = E.handle handler $ do
-    r <- recvBufWith sock ptr capacity (shutdownReached ss appsInProgress)
-    case r of
-        Left () -> pure 0
-        Right n -> pure n
+    -- As in 'receiveWith': bytes already waiting (or EOF) are taken without
+    -- involving the IO manager, and so win over a shutdown. Only when there
+    -- are none, or the read failed, which the waiting read reports with its
+    -- errno intact, is the read waited for together with the shutdown.
+    early <- recvBufNoWait sock ptr capacity
+    if early >= 0
+        then pure early
+        else do
+            r <- recvBufWith sock ptr capacity (shutdownReached ss appsInProgress)
+            case r of
+                Left () -> pure 0
+                Right n -> pure n
   where
     handler :: E.IOException -> IO Int
     handler e
