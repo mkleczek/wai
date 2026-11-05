@@ -1,5 +1,13 @@
 # ChangeLog for time-manager
 
+## 0.5.2.1
+
+* `tickle` and `resume` no longer edit GHC's System TimerManager queue.
+  They only move the deadline, and the registered timer checks it when it
+  fires and reregisters for the remaining time. Every renewal used to
+  contend on the queue's single `IORef`, which convoys threads on black
+  holes with many connections.
+
 ## 0.5.2
 
 * A timeout now fires on Windows under the old I/O manager, which is

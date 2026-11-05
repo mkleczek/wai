@@ -356,19 +356,21 @@ cancel h@Handle{..} =
 -- skipped unless at least a quarter of the timeout (capped at one
 -- second) has passed since the timeout was last registered or updated.
 --
+-- The renewal only moves the deadline of the 'Handle' and leaves GHC's
+-- timer queue alone: the registered timer checks the deadline when it fires
+-- and reregisters itself for the remaining time ('adjustOnTimeout'). The
+-- queue is one 'IORef' shared by every timeout, so editing it per request
+-- makes every connection wait for the thread that is evaluating the
+-- previous edit.
+--
 -- Careful: this does NOT reactivate an already 'pause'd 'Handle'!
 --
 tickle :: Handle -> IO ()
 tickle h@Handle{..} =
     withNonEmptyHandle h $
         whenRenew h $
-            withActiveTimeoutKey h $ \key -> do
-                updateTheTimeout key
-                now <- getMonotonicTimeNSec
-                I.atomicWriteIORef handleLastRenewed now
-  where
-    updateTheTimeout key =
-        EV.updateTimeout handleTimerManager key handleTimeout
+            withActiveTimeoutKey h $ \_ ->
+                I.atomicWriteIORef handleLastRenewed =<< getMonotonicTimeNSec
 
 -- | Pauses the timeout so you can 'resume' it later. Does not stop it entirely.
 -- Use 'cancel' if you want to make sure the action will not be resumed.
