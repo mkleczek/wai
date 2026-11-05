@@ -1,5 +1,46 @@
 # ChangeLog for time-manager
 
+## 0.5.2
+
+* A timeout now fires on Windows under the old I/O manager, which is
+  still the default there. The timer was `GHC.Event.Windows`, WinIO's
+  own, so nothing ran the action unless the program used WinIO: warp
+  timed no connection out, and neither did anything else on top.
+  [#1139](https://github.com/yesodweb/wai/issues/1139)
+* `tickle` extends a timeout by microseconds on Windows as it does
+  everywhere else.  It floored the value to a whole second there, which
+  meant a timeout under a second was never extended at all.
+
+## 0.5.1
+
+* A renewed timeout compared nanoseconds with microseconds, so a timeout
+  renewed after its callback had been queued ran at once instead of being
+  rescheduled for the time it had just been given. Wrong since 0.4.0.
+  [#1134](https://github.com/yesodweb/wai/pull/1134)
+
+## 0.5.0
+
+* BREAKING CHANGE: a `ThreadManager` no longer carries a `T.Manager`.
+  `newThreadManager` takes no argument, `forkManagedTimeout` and
+  `forkManagedTimeoutFinally` take the caller's, and `withHandle` and the
+  re-exports from `System.TimeManager` are gone.
+  [#1131](https://github.com/yesodweb/wai/pull/1131)
+* Count a thread in `System.ThreadManager` from when it is forked rather
+  than from when it starts, with `forkManagedBy`, `reserveManaged`,
+  `takeReservation` and `countManaged`.
+  [#1128](https://github.com/yesodweb/wai/pull/1128)
+* Keep counting the threads `stopAfter` stopped until they end.
+  [#1128](https://github.com/yesodweb/wai/pull/1128)
+* `countManaged` throws `AssertionFailed` when a reservation has been taken
+  by a manager other than its own.
+  [#1128](https://github.com/yesodweb/wai/pull/1128)
+* `forkManagedFinally` and `forkManagedTimeoutFinally` no longer swallow an
+  exception from the action; it ends the thread, after the cleanup has run.
+  [#1128](https://github.com/yesodweb/wai/pull/1128)
+* Add `forkManagedUnmaskFinally`, so that every fork has a variant with a
+  cleanup.
+  [#1128](https://github.com/yesodweb/wai/pull/1128)
+
 ## 0.4.0
 
 * CHANGES IN BEHAVIOUR:

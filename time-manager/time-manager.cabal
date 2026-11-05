@@ -1,6 +1,6 @@
 cabal-version:      >=1.10
 name:               time-manager
-version:            0.4.0
+version:            0.5.2
 license:            MIT
 license-file:       LICENSE
 maintainer:         kazu@iij.ad.jp
@@ -25,6 +25,9 @@ library
     other-modules:
         System.TimeManager.Internal
 
+    if os(windows)
+        other-modules: System.TimeManager.Windows
+
     default-language:   Haskell2010
     default-extensions: Strict StrictData
     ghc-options:        -Wall
@@ -37,12 +40,19 @@ test-suite spec
     type:             exitcode-stdio-1.0
     main-is:          test/Spec.hs
     other-modules:
+        System.ThreadManager,
         System.TimeManager,
         System.TimeManager.Internal
+
+    if os(windows)
+        other-modules: System.TimeManager.Windows
+
     build-depends:    base
     default-language: Haskell2010
     ghc-options:      -Wall -threaded
     build-depends:
         base >=4.12 && <5,
+        containers,
         hspec,
-        HUnit
+        HUnit,
+        stm
